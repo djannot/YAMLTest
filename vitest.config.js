@@ -8,8 +8,12 @@ export default defineConfig({
     // integration/e2e servers and to keep CJS module isolation predictable.
     fileParallelism: false,
     pool: 'threads',
-    testTimeout: 20000,
-    hookTimeout: 15000,
+    // Generous timeouts to accommodate:
+    //   - kind cluster creation + node:slim image load (~90s)
+    //   - kubectl debug ephemeral container startup (~30s)
+    //   - kubectl port-forward setup (~5s)
+    testTimeout: 120_000,
+    hookTimeout: 210_000,
     coverage: {
       provider: 'v8',
       reporter: ['text', 'lcov', 'html'],

@@ -1781,29 +1781,42 @@ async function executePodCommand(test, commandConfig) {
   // Use the command string directly
   const fullCommand = commandConfig.command;
 
-  // Prepare environment variables
+  // Prepare environment variables as export statements prepended to the command.
+  // Values are single-quote escaped to survive the outer sh -c wrapping safely.
   let envPrefix = '';
   if (commandConfig.env && Object.keys(commandConfig.env).length > 0) {
     const envVars = Object.entries(commandConfig.env)
-      .map(([key, value]) => `${key}="${value}"`)
-      .join(' ');
-    envPrefix = `env ${envVars} `;
+      .map(([key, value]) => {
+        // Escape single quotes inside the value: ' → '\''
+        const escaped = String(value).replace(/'/g, "'\\''");
+        return `export ${key}='${escaped}'`;
+      })
+      .join('; ');
+    envPrefix = `${envVars}; `;
   }
 
   // Prepare working directory
   let cdPrefix = '';
   if (commandConfig.workingDir) {
-    cdPrefix = `cd "${commandConfig.workingDir}" && `;
+    // Single-quote escape the working dir path
+    const escapedDir = commandConfig.workingDir.replace(/'/g, "'\\''");
+    cdPrefix = `cd '${escapedDir}' && `;
   }
 
   const finalCommand = `${cdPrefix}${envPrefix}${fullCommand}`;
+
+  // Wrap finalCommand in single quotes for `sh -c '...'` so that any double
+  // quotes, dollar signs, or special characters in the command or env values
+  // are passed through verbatim.  Any literal single quotes inside
+  // finalCommand are escaped as '\''.
+  const escapedFinalCommand = finalCommand.replace(/'/g, "'\\''");
 
   // Build kubectl exec command
   let kubectlCmd = `kubectl ${contextArg} ${namespaceArg} exec ${podName}`;
   if (test.source.container) {
     kubectlCmd += ` -c ${test.source.container}`;
   }
-  kubectlCmd += ` -- sh -c "${finalCommand}"`;
+  kubectlCmd += ` -- sh -c '${escapedFinalCommand}'`;
 
   debugLog(`Executing pod command: ${kubectlCmd}`);
 
