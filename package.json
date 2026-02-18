@@ -1,0 +1,45 @@
+{
+  "name": "yamltest",
+  "version": "1.0.0",
+  "description": "Declarative YAML-based HTTP, command, and Kubernetes test runner",
+  "main": "./src/index.js",
+  "bin": {
+    "YAMLTests": "./src/cli.js"
+  },
+  "files": [
+    "src/",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "test:unit": "vitest run test/unit",
+    "test:integration": "vitest run test/integration",
+    "test:e2e": "vitest run test/e2e"
+  },
+  "keywords": [
+    "yaml",
+    "test",
+    "http",
+    "kubernetes",
+    "declarative",
+    "testing"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^1.6.0",
+    "deep-diff": "^1.0.2",
+    "fs-extra": "^11.2.0",
+    "js-yaml": "^4.1.0",
+    "jsonpath-plus": "^9.0.0"
+  },
+  "devDependencies": {
+    "@vitest/coverage-v8": "^1.6.0",
+    "vitest": "^1.6.0"
+  }
+}
