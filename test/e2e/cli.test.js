@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * End-to-end tests for the YAMLTests CLI binary.
+ * End-to-end tests for the YAMLTest CLI binary.
  *
  * Spawns the actual `node src/cli.js` process and asserts on exit code + stdout.
  * The HTTP server is started as a separate child process to avoid conflicts
@@ -115,7 +115,7 @@ describe('CLI e2e – help', () => {
   it('prints usage with --help and exits 0', () => {
     const r = runCli('', ['--help']);
     expect(r.status).toBe(0);
-    expect(r.stdout).toContain('YAMLTests');
+    expect(r.stdout).toContain('YAMLTest');
     expect(r.stdout).toContain('-f');
   });
 

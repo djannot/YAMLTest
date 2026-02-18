@@ -23,7 +23,7 @@ npm install -g /path/to/YAMLTest
 # Or run directly without installing
 node /path/to/YAMLTest/src/cli.js -f your-tests.yaml
 
-# Or link it for development (makes YAMLTests available system-wide, auto-updates)
+# Or link it for development (makes YAMLTest available system-wide, auto-updates)
 cd /path/to/YAMLTest && npm link
 ```
 
@@ -38,7 +38,7 @@ npm install --save-dev /path/to/YAMLTest
 ## Quick start
 
 ```bash
-YAMLTests -f - <<EOF
+YAMLTest -f - <<EOF
 - name: httpbin returns 200
   http:
     url: "https://httpbin.org"
@@ -66,8 +66,8 @@ Output:
 
 ```
 USAGE
-  YAMLTests -f <file.yaml>
-  YAMLTests -f -              # read from stdin (heredoc)
+  YAMLTest -f <file.yaml>
+  YAMLTest -f -              # read from stdin (heredoc)
 
 OPTIONS
   -f, --file <path|->   YAML file to run, or - for stdin
@@ -409,7 +409,7 @@ http:
 ## Debug logging
 
 ```bash
-DEBUG_MODE=true YAMLTests -f tests.yaml
+DEBUG_MODE=true YAMLTest -f tests.yaml
 ```
 
 Prints full request/response details, comparison results, and kubectl commands.
@@ -423,7 +423,7 @@ src/
   core.js       # Test execution engine (HTTP, command, wait, comparison)
   runner.js     # Multi-test orchestration (YAML parsing, fail-fast, retry)
   index.js      # Public API
-  cli.js        # YAMLTests binary entry point
+  cli.js        # YAMLTest binary entry point
 test/
   unit/         # Pure function tests (compareValue, filterJson, parseCurl, ...)
   integration/  # Real HTTP server + real shell command tests

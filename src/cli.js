@@ -2,12 +2,12 @@
 'use strict';
 
 /**
- * YAMLTests CLI
+ * YAMLTest CLI
  *
  * Usage:
- *   YAMLTests -f <file.yaml>
- *   YAMLTests -f -                    # read from stdin
- *   YAMLTests -f <<EOF
+ *   YAMLTest -f <file.yaml>
+ *   YAMLTest -f -                    # read from stdin
+ *   YAMLTest -f <<EOF
  *   - name: test
  *     http: { url: "http://...", method: GET, path: "/" }
  *     source: { type: local }
@@ -56,12 +56,12 @@ function printUsage() {
   process.stdout.write(
     [
       '',
-      c.bold('YAMLTests') + ' – declarative YAML test runner',
+      c.bold('YAMLTest') + ' – declarative YAML test runner',
       '',
       c.bold('USAGE'),
-      '  YAMLTests -f <file.yaml>',
-      '  YAMLTests -f -              # read YAML from stdin',
-      '  YAMLTests -f <<EOF',
+      '  YAMLTest -f <file.yaml>',
+      '  YAMLTest -f -              # read YAML from stdin',
+      '  YAMLTest -f <<EOF',
       '  - name: my-test',
       '    http:',
       '      url: "http://example.com"',

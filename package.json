@@ -4,7 +4,8 @@
   "description": "Declarative YAML-based HTTP, command, and Kubernetes test runner",
   "main": "./src/index.js",
   "bin": {
-    "YAMLTests": "./src/cli.js"
+    "YAMLTest": "./src/cli.js",
+    "yamltest": "./src/cli.js"
   },
   "files": [
     "src/",
