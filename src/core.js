@@ -17,6 +17,40 @@ function debugLog(...args) {
 }
 
 /**
+ * Module-level map that accumulates env vars set via targetEnv / capture
+ * so the CLI can write them to a --save-env file for the parent shell to source.
+ */
+const _pendingEnvVars = {};
+
+/**
+ * Set a target environment variable in the current process and track it for
+ * potential export to an env file.
+ * @param {string} name  - Environment variable name
+ * @param {string} value - Value to assign
+ */
+function setTargetEnv(name, value) {
+  process.env[name] = value;
+  _pendingEnvVars[name] = value;
+  debugLog(`Set env var ${name}=${value}`);
+}
+
+/**
+ * Return a shallow copy of all env vars set via setTargetEnv since the
+ * process started (or since clearEnvVarsToExport was last called).
+ * @returns {object}
+ */
+function getEnvVarsToExport() {
+  return { ..._pendingEnvVars };
+}
+
+/**
+ * Clear the accumulated env-var map (called between test runs in tests).
+ */
+function clearEnvVarsToExport() {
+  Object.keys(_pendingEnvVars).forEach((k) => delete _pendingEnvVars[k]);
+}
+
+/**
  * Builds kubectl command argument parts for resource selection
  * @param {object} selector - The Kubernetes selector
  * @returns {object} - Object containing command argument parts
@@ -59,7 +93,9 @@ module.exports = {
   executeCommandTest,
   executeHttpBodyComparisonTest,
   filterJsonByJsonPath,
-  executePodHttpRequestViaPodExec
+  executePodHttpRequestViaPodExec,
+  getEnvVarsToExport,
+  clearEnvVarsToExport,
 };
 
 /**
@@ -513,6 +549,22 @@ async function executeHttpTest(test) {
 
     // Validate expectations - this will throw if validation fails
     validateHttpExpectations(response, test.expect, testName);
+
+    // Capture values from the response body into environment variables
+    if (test.capture && typeof test.capture === 'object') {
+      for (const [envName, jsonPath] of Object.entries(test.capture)) {
+        let matches = JSONPath({ path: jsonPath, json: response.body });
+        if (!matches.length) {
+          matches = JSONPath({ path: `$${jsonPath}`, json: response.body });
+        }
+        if (matches.length && matches[0] !== null && matches[0] !== undefined) {
+          const valueToSet = typeof matches[0] === 'string' ? matches[0] : JSON.stringify(matches[0]);
+          setTargetEnv(envName, valueToSet);
+        } else {
+          debugLog(`capture: jsonPath ${jsonPath} not found in response body`);
+        }
+      }
+    }
 
     debugLog(`Test passed: ${testName}`);
   } catch (error) {
@@ -1575,8 +1627,7 @@ async function executeKubectlWait(config) {
         // Only set environment variable if targetEnv is provided
         if (targetEnv) {
           const valueToSet = typeof extractedValue === 'string' ? extractedValue : JSON.stringify(extractedValue);
-          debugLog(`Setting environment variable ${targetEnv}=${valueToSet}`);
-          process.env[targetEnv] = valueToSet;
+          setTargetEnv(targetEnv, valueToSet);
         }
       } else {
         // If no jsonPath is provided, we just wait for the resource to exist

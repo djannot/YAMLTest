@@ -60,6 +60,32 @@ Output:
   1 passed | 1 total
 ```
 
+### Capture a value from a JSON response into a shell variable
+
+```bash
+# 1. Run the test and save captured values to a temporary env file
+YAMLTest --save-env /tmp/yamltest-env.sh -f - <<EOF
+- name: fetch todo and capture ID
+  http:
+    url: "https://jsonplaceholder.typicode.com"
+    method: GET
+    path: "/todos/1"
+  source:
+    type: local
+  expect:
+    statusCode: 200
+  capture:
+    TODO_ID: "$.id"
+    TODO_TITLE: "$.title"
+EOF
+
+# 2. Source the file to bring the variables into your shell
+source /tmp/yamltest-env.sh
+
+# 3. Use the captured variables
+echo "Todo #${TODO_ID}: ${TODO_TITLE}"
+```
+
 ---
 
 ## CLI
@@ -70,12 +96,13 @@ USAGE
   YAMLTest -f -              # read from stdin (heredoc)
 
 OPTIONS
-  -f, --file <path|->   YAML file to run, or - for stdin
-  -h, --help            Show this help
+  -f, --file <path|->        YAML file to run, or - for stdin
+  --save-env <path>          Write captured env vars to a file (source it afterwards)
+  -h, --help                 Show this help
 
 ENVIRONMENT
-  DEBUG_MODE=true       Enable verbose debug logging
-  NO_COLOR=1            Disable ANSI colour output
+  DEBUG_MODE=true            Enable verbose debug logging
+  NO_COLOR=1                 Disable ANSI colour output
 ```
 
 Exit codes: `0` = all passed, `1` = one or more failed.
@@ -152,6 +179,36 @@ Test any HTTP endpoint locally or from within a Kubernetes pod.
       - name: content-type
         comparator: contains
         value: application/json
+  capture:                            # optional: extract values into env vars
+    USER_ID: "$.user.id"
+    USER_NAME: "$.user.name"
+```
+
+**Runnable example** – fetch a todo and capture fields from the JSON response:
+
+```bash
+YAMLTest --save-env /tmp/todo-env.sh -f - <<EOF
+- name: fetch todo
+  http:
+    url: "https://jsonplaceholder.typicode.com"
+    method: GET
+    path: "/todos/1"
+  source:
+    type: local
+  expect:
+    statusCode: 200
+    bodyJsonPath:
+      - path: "$.userId"
+        comparator: equals
+        value: 1
+  capture:
+    TODO_ID: "$.id"
+    TODO_TITLE: "$.title"
+    TODO_COMPLETED: "$.completed"
+EOF
+
+source /tmp/todo-env.sh
+echo "Todo ${TODO_ID}: ${TODO_TITLE} (completed: ${TODO_COMPLETED})"
 ```
 
 #### Environment variable substitution
@@ -280,6 +337,37 @@ Poll a Kubernetes resource until a condition is met (or timeout).
       maxRetries: 24             # optional upper bound
 ```
 
+The `targetEnv` value is stored inside the YAMLTest process. To use it in your shell, combine it with `--save-env`:
+
+```bash
+YAMLTest --save-env /tmp/k8s-env.sh -f - <<EOF
+- name: wait for deployment ready
+  wait:
+    target:
+      kind: Deployment
+      metadata:
+        namespace: default
+        name: my-app
+    jsonPath: "$.status.readyReplicas"
+    jsonPathExpectation:
+      comparator: greaterThan
+      value: 0
+    targetEnv: READY_REPLICAS
+    polling:
+      timeoutSeconds: 120
+      intervalSeconds: 5
+EOF
+
+source /tmp/k8s-env.sh
+echo "Ready replicas: ${READY_REPLICAS}"
+```
+
+> **Kubernetes setup:** To run k8s examples locally, create a cluster with [kind](https://kind.sigs.k8s.io/):
+> ```bash
+> kind create cluster --name my-cluster
+> kubectl --context kind-my-cluster create deployment my-app --image=nginx
+> ```
+
 Selector by labels:
 
 ```yaml
@@ -363,6 +451,59 @@ expect:
 ---
 
 ## Advanced features
+
+### Capturing values into shell environment variables
+
+YAMLTest can extract values from test responses and make them available in your shell after the run.
+
+**HTTP tests** use a `capture` map at the test level:
+
+```bash
+YAMLTest --save-env /tmp/env.sh -f - <<EOF
+- name: fetch user
+  http:
+    url: "https://jsonplaceholder.typicode.com"
+    method: GET
+    path: "/users/1"
+  source:
+    type: local
+  expect:
+    statusCode: 200
+  capture:
+    USER_NAME: "$.name"
+    USER_EMAIL: "$.email"
+    USER_CITY: "$.address.city"
+EOF
+
+source /tmp/env.sh
+echo "Name: ${USER_NAME}, Email: ${USER_EMAIL}, City: ${USER_CITY}"
+```
+
+**Kubernetes wait tests** use `targetEnv` (a single variable):
+
+```bash
+YAMLTest --save-env /tmp/k8s-env.sh -f - <<EOF
+- name: wait for deployment
+  wait:
+    target:
+      kind: Deployment
+      metadata:
+        namespace: default
+        name: my-app
+    jsonPath: "$.status.readyReplicas"
+    jsonPathExpectation:
+      comparator: greaterThan
+      value: 0
+    targetEnv: READY_REPLICAS
+    polling:
+      timeoutSeconds: 60
+EOF
+
+source /tmp/k8s-env.sh
+echo "Ready replicas: ${READY_REPLICAS}"
+```
+
+The `--save-env <path>` flag writes `export VAR='value'` lines to the given file. Source it in your shell to make the variables available. The file is only written when at least one variable was captured.
 
 ### Retry on failure
 

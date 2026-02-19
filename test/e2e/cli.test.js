@@ -49,6 +49,11 @@ const server = http.createServer((req, res) => {
     res.end('healthy');
     return;
   }
+  if (req.url === '/json') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ userId: 1, id: 42, title: 'buy groceries', completed: false }));
+    return;
+  }
   if (req.url === '/v1/chat/completions') {
     res.writeHead(200, { 'Content-Type': 'text/event-stream' });
     res.end('data: {"id":"1"}\\ndata: [DONE]\\n');
@@ -250,5 +255,54 @@ describe('CLI e2e – reading from a file', () => {
     const r = runCli('', ['-f', '/nonexistent/path/file.yaml']);
     expect(r.status).toBe(1);
     expect(r.stderr).toContain('File not found');
+  });
+});
+
+// ── capture field ─────────────────────────────────────────────────────────────
+
+describe('CLI e2e – capture', () => {
+  it('writes captured JSON values to --save-env and they can be sourced', () => {
+    const envFile = path.join(os.tmpdir(), `yamltest-capture-${Date.now()}.sh`);
+    const yaml = JSON.stringify({
+      name: 'capture-test',
+      http: { url: base(), method: 'GET', path: '/json' },
+      source: { type: 'local' },
+      expect: { statusCode: 200 },
+      capture: { TODO_ID: '$.id', TODO_TITLE: '$.title' },
+    });
+    try {
+      const r = runCli(yaml, ['-f', '-', '--save-env', envFile]);
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain('capture-test');
+
+      // Verify the env file was written
+      expect(fs.existsSync(envFile)).toBe(true);
+      const content = fs.readFileSync(envFile, 'utf8');
+      expect(content).toContain("export TODO_ID='42'");
+      expect(content).toContain("export TODO_TITLE='buy groceries'");
+
+      // Verify the CLI printed a source instruction
+      expect(r.stdout).toContain(`source ${envFile}`);
+    } finally {
+      try { fs.unlinkSync(envFile); } catch (_) {}
+    }
+  });
+
+  it('does not write an env file when no vars are captured', () => {
+    const envFile = path.join(os.tmpdir(), `yamltest-capture-empty-${Date.now()}.sh`);
+    const yaml = JSON.stringify({
+      name: 'no-capture',
+      http: { url: base(), method: 'GET', path: '/health' },
+      source: { type: 'local' },
+      expect: { statusCode: 200 },
+    });
+    try {
+      const r = runCli(yaml, ['-f', '-', '--save-env', envFile]);
+      expect(r.status).toBe(0);
+      // No vars captured → file should NOT be written
+      expect(fs.existsSync(envFile)).toBe(false);
+    } finally {
+      try { fs.unlinkSync(envFile); } catch (_) {}
+    }
   });
 });

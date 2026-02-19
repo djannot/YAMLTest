@@ -22,6 +22,7 @@
 const fs = require('fs');
 const path = require('path');
 const { runTests } = require('./runner');
+const { getEnvVarsToExport } = require('./core');
 
 // ── ANSI colours (disabled when NO_COLOR is set or stdout is not a TTY) ──────
 const useColor = process.stdout.isTTY && !process.env.NO_COLOR;
@@ -36,7 +37,7 @@ const c = {
 // ── Argument parsing ──────────────────────────────────────────────────────────
 function parseArgs(argv) {
   const args = argv.slice(2); // strip node + script
-  const opts = { file: null };
+  const opts = { file: null, envFile: null };
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '-f' || args[i] === '--file') {
@@ -44,6 +45,11 @@ function parseArgs(argv) {
       i++;
     } else if (args[i].startsWith('-f=')) {
       opts.file = args[i].slice(3);
+    } else if (args[i] === '--save-env') {
+      opts.envFile = args[i + 1] || null;
+      i++;
+    } else if (args[i].startsWith('--save-env=')) {
+      opts.envFile = args[i].slice('--save-env='.length);
     } else if (args[i] === '--help' || args[i] === '-h') {
       opts.help = true;
     }
@@ -74,12 +80,13 @@ function printUsage() {
       '  EOF',
       '',
       c.bold('OPTIONS'),
-      '  -f, --file <path|->   YAML file to run, or - for stdin',
-      '  -h, --help            Show this help',
+      '  -f, --file <path|->        YAML file to run, or - for stdin',
+      '  --save-env <path>          Write captured env vars to a file (source it in your shell)',
+      '  -h, --help                 Show this help',
       '',
       c.bold('ENVIRONMENT'),
-      '  DEBUG_MODE=true       Enable verbose debug logging',
-      '  NO_COLOR=1            Disable ANSI colour output',
+      '  DEBUG_MODE=true            Enable verbose debug logging',
+      '  NO_COLOR=1                 Disable ANSI colour output',
       '',
     ].join('\n')
   );
@@ -113,6 +120,16 @@ async function readInput(filePath) {
 function formatDuration(ms) {
   if (ms < 1000) return `${ms}ms`;
   return `${(ms / 1000).toFixed(2)}s`;
+}
+
+/**
+ * Safely quote a value for use in a POSIX shell `export VAR=VALUE` line.
+ * Wraps the value in single quotes and escapes any single quotes inside it.
+ * @param {string} value
+ * @returns {string}
+ */
+function shellQuote(value) {
+  return "'" + String(value).replace(/'/g, "'\\''") + "'";
 }
 
 function printResults(result) {
@@ -194,6 +211,24 @@ async function main() {
   }
 
   printResults(result);
+
+  // ── Write captured env vars to file if --save-env was specified ───────────
+  if (opts.envFile) {
+    const envVars = getEnvVarsToExport();
+    const entries = Object.entries(envVars);
+    if (entries.length > 0) {
+      const lines = entries.map(([k, v]) => `export ${k}=${shellQuote(v)}`);
+      try {
+        fs.writeFileSync(opts.envFile, lines.join('\n') + '\n', 'utf8');
+        process.stdout.write(
+          c.dim(`  Env vars written to ${opts.envFile} – run: `) +
+          c.bold(`source ${opts.envFile}`) + '\n\n'
+        );
+      } catch (err) {
+        process.stderr.write(c.red('Error: ') + `Failed to write env file: ${err.message}\n`);
+      }
+    }
+  }
 
   process.exit(result.failed > 0 ? 1 : 0);
 }

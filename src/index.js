@@ -27,6 +27,8 @@ const {
   executeHttpBodyComparisonTest,
   filterJsonByJsonPath,
   executePodHttpRequestViaPodExec,
+  getEnvVarsToExport,
+  clearEnvVarsToExport,
 } = require('./core');
 
 module.exports = {
@@ -43,4 +45,8 @@ module.exports = {
   executeHttpBodyComparisonTest,
   filterJsonByJsonPath,
   executePodHttpRequestViaPodExec,
+
+  // Env-var capture helpers
+  getEnvVarsToExport,
+  clearEnvVarsToExport,
 };
