@@ -59,7 +59,8 @@ module.exports = {
   executeCommandTest,
   executeHttpBodyComparisonTest,
   filterJsonByJsonPath,
-  executePodHttpRequestViaPodExec
+  executePodHttpRequestViaPodExec,
+  applySetVars
 };
 
 /**
@@ -93,7 +94,7 @@ async function executeTest(yamlDefinition) {
   
   if (testConfig.wait) {
     debugLog('Detected wait test, dispatching to executeKubectlWait');
-    return executeKubectlWait(testConfig.wait);
+    return executeKubectlWait(testConfig.wait, testConfig.setVars);
   }
   
   if (testConfig.httpBodyComparison) {
@@ -368,6 +369,130 @@ function resolveEnvVarsInUrl(url) {
 }
 
 /**
+ * Apply setVars rules to extract values from test response data and store them in process.env.
+ *
+ * Supported extraction sources by test type:
+ *
+ *   HTTP:    jsonPath, header, statusCode, body, regex
+ *   Command: jsonPath, stdout, stderr, exitCode, regex
+ *   Wait:    value
+ *
+ * @param {object} setVars - Map of variable names to extraction rules
+ * @param {object} data    - The response/result data from the test execution
+ * @param {string} testType - One of 'http', 'command', 'wait'
+ */
+function applySetVars(setVars, data, testType) {
+  if (!setVars || typeof setVars !== 'object') return;
+
+  for (const [varName, rule] of Object.entries(setVars)) {
+    let value;
+
+    if (rule.jsonPath) {
+      // HTTP: extract from body; Command: extract from parsed JSON stdout
+      if (testType !== 'http' && testType !== 'command') {
+        throw new Error(`setVars "${varName}": "jsonPath" source is not valid for ${testType} tests`);
+      }
+      const jsonData = testType === 'http'
+        ? (typeof data.body === 'string' ? JSON.parse(data.body) : data.body)
+        : data.json;
+      if (!jsonData) {
+        throw new Error(`setVars "${varName}": no JSON data available for jsonPath extraction`);
+      }
+      const results = JSONPath({ path: rule.jsonPath, json: jsonData });
+      if (!results.length) {
+        throw new Error(`setVars "${varName}": jsonPath "${rule.jsonPath}" returned no results`);
+      }
+      value = results.length === 1 ? results[0] : results;
+
+    } else if (rule.header) {
+      if (testType !== 'http') {
+        throw new Error(`setVars "${varName}": "header" source is only valid for http tests`);
+      }
+      value = data.headers?.[rule.header.toLowerCase()];
+
+    } else if (rule.statusCode === true) {
+      if (testType !== 'http') {
+        throw new Error(`setVars "${varName}": "statusCode" source is only valid for http tests`);
+      }
+      value = data.statusCode;
+
+    } else if (rule.body === true) {
+      if (testType !== 'http') {
+        throw new Error(`setVars "${varName}": "body" source is only valid for http tests`);
+      }
+      value = typeof data.body === 'string' ? data.body : JSON.stringify(data.body);
+
+    } else if (rule.stdout === true) {
+      if (testType !== 'command') {
+        throw new Error(`setVars "${varName}": "stdout" source is only valid for command tests`);
+      }
+      value = data.stdout;
+
+    } else if (rule.stderr === true) {
+      if (testType !== 'command') {
+        throw new Error(`setVars "${varName}": "stderr" source is only valid for command tests`);
+      }
+      value = data.stderr;
+
+    } else if (rule.exitCode === true) {
+      if (testType !== 'command') {
+        throw new Error(`setVars "${varName}": "exitCode" source is only valid for command tests`);
+      }
+      value = data.exitCode;
+
+    } else if (rule.value === true) {
+      if (testType !== 'wait') {
+        throw new Error(`setVars "${varName}": "value" source is only valid for wait tests`);
+      }
+      value = data.extractedValue;
+
+    } else if (rule.regex) {
+      if (testType === 'wait') {
+        throw new Error(`setVars "${varName}": "regex" source is not valid for wait tests`);
+      }
+
+      // Determine the text to search
+      let text;
+      if (testType === 'http') {
+        text = typeof data.body === 'string' ? data.body : JSON.stringify(data.body);
+      } else if (testType === 'command') {
+        const source = rule.regex.source || 'stdout';
+        if (source !== 'stdout' && source !== 'stderr') {
+          throw new Error(`setVars "${varName}": regex source must be "stdout" or "stderr", got "${source}"`);
+        }
+        text = data[source];
+      }
+
+      if (text === undefined || text === null) {
+        throw new Error(`setVars "${varName}": no text available for regex extraction`);
+      }
+
+      const re = new RegExp(rule.regex.pattern);
+      const match = re.exec(text);
+      if (!match) {
+        throw new Error(`setVars "${varName}": regex "${rule.regex.pattern}" did not match`);
+      }
+      const group = rule.regex.group ?? 1;
+      value = match[group];
+      if (value === undefined) {
+        throw new Error(`setVars "${varName}": regex capture group ${group} not found in match`);
+      }
+
+    } else {
+      throw new Error(`setVars "${varName}": unknown extraction rule: ${JSON.stringify(rule)}`);
+    }
+
+    if (value === undefined || value === null) {
+      throw new Error(`setVars "${varName}": extracted value is null or undefined`);
+    }
+
+    const strValue = typeof value === 'string' ? value : JSON.stringify(value);
+    process.env[varName] = strValue.trim();
+    debugLog(`setVars: ${varName}=${strValue}`);
+  }
+}
+
+/**
  * Discover the LoadBalancer IP and port for a Kubernetes service
  * @param {object} selector - The Kubernetes selector for the service
  * @param {number|string} portSpec - Optional port specification (port number, name, or index)
@@ -458,6 +583,11 @@ async function executeHttpTest(test) {
     throw new Error('HTTP configuration missing for HTTP test');
   }
 
+  // setVars requires expect to be present
+  if (test.setVars && !test.expect) {
+    throw new Error('setVars requires "expect" to be defined on the test');
+  }
+
   // Auto-discover LoadBalancer IP and port if URL is not set, source type is local, and kind is Service
   if (!test.http.url && test.source.type === 'local' && test.source.selector && test.source.selector.kind === 'Service') {
     debugLog('Auto-discovering LoadBalancer IP and port for Service');
@@ -470,6 +600,15 @@ async function executeHttpTest(test) {
   test.http.url = resolveEnvVarsInUrl(test.http.url);// Resolve environment variables in URL
   test.http.method = test.http.method || 'GET';
   test.http.path = test.http.path || '/';
+
+  // Resolve environment variables in headers
+  if (test.http.headers && typeof test.http.headers === 'object') {
+    for (const [key, value] of Object.entries(test.http.headers)) {
+      if (typeof value === 'string') {
+        test.http.headers[key] = resolveEnvVarsInString(value);
+      }
+    }
+  }
 
   // Create a descriptive test name
   let testName = `${test.http.method} ${test.http.url}${test.http.path}`;
@@ -513,6 +652,11 @@ async function executeHttpTest(test) {
 
     // Validate expectations - this will throw if validation fails
     validateHttpExpectations(response, test.expect, testName);
+
+    // Apply setVars after successful validation
+    if (test.setVars) {
+      applySetVars(test.setVars, response, 'http');
+    }
 
     debugLog(`Test passed: ${testName}`);
   } catch (error) {
@@ -1464,10 +1608,19 @@ function getResourceDescription(selector) {
  * @param {object} config - Configuration for the wait operation
  * @returns {Promise<void>} - Promise that resolves when the condition is met or rejects with an error
  */
-async function executeKubectlWait(config) {
+async function executeKubectlWait(config, setVars) {
   if (!config.target) throw new Error('target block required for kubectl-wait');
 
-  const { target, jsonPath, jsonPathExpectation, targetEnv, polling } = config;
+  const { target, jsonPath, jsonPathExpectation, polling } = config;
+
+  // Validate setVars for wait: value extraction requires jsonPath
+  if (setVars) {
+    for (const [varName, rule] of Object.entries(setVars)) {
+      if (rule.value === true && !jsonPath) {
+        throw new Error(`setVars "${varName}": "value" extraction requires "jsonPath" to be defined in the wait config`);
+      }
+    }
+  }
 
   // Get kubectl selector args
   const selectorArgs = buildSelectorArgs(target);
@@ -1572,11 +1725,9 @@ async function executeKubectlWait(config) {
           debugLog(`Found value for ${jsonPath}: ${typeof extractedValue === 'string' ? extractedValue : JSON.stringify(extractedValue)}`);
         }
 
-        // Only set environment variable if targetEnv is provided
-        if (targetEnv) {
-          const valueToSet = typeof extractedValue === 'string' ? extractedValue : JSON.stringify(extractedValue);
-          debugLog(`Setting environment variable ${targetEnv}=${valueToSet}`);
-          process.env[targetEnv] = valueToSet;
+        // Apply setVars if provided
+        if (setVars) {
+          applySetVars(setVars, { extractedValue }, 'wait');
         }
       } else {
         // If no jsonPath is provided, we just wait for the resource to exist
@@ -1615,6 +1766,11 @@ async function executeKubectlWait(config) {
 async function executeCommandTest(test) {
   if (!test.command) {
     throw new Error('Command configuration missing for command test');
+  }
+
+  // setVars requires expect to be present
+  if (test.setVars && !test.expect) {
+    throw new Error('setVars requires "expect" to be defined on the test');
   }
 
   // Only support object format
@@ -1663,6 +1819,11 @@ async function executeCommandTest(test) {
     // Validate expectations if provided
     if (test.expect) {
       validateCommandExpectations(result, test.expect, testName);
+    }
+
+    // Apply setVars after successful validation
+    if (test.setVars) {
+      applySetVars(test.setVars, result, 'command');
     }
 
     debugLog(`✓ Command test passed: ${testName}`);

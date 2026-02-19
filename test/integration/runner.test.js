@@ -168,19 +168,21 @@ describe('Runner integration – result structure', () => {
   });
 });
 
-describe('Runner integration – targetEnv within-run chaining', () => {
-  it('an env var set in process.env before a run is visible to subsequent command tests', async () => {
-    // This is exactly what targetEnv does for wait tests: it writes to process.env
-    // so that the next test's spawned shell inherits it.
-    const key = 'YAMLTEST_CHAIN_TEST_VAR';
-    delete process.env[key];
-
-    // Simulate what executeKubectlWait does when targetEnv fires
-    process.env[key] = 'chained-value';
+describe('Runner integration – setVars within-run chaining', () => {
+  it('setVars from a command test is visible to subsequent command tests', async () => {
+    // setVars writes to process.env so that the next test's spawned shell inherits it.
+    const key = 'YAMLTEST_SETVARS_CHAIN';
 
     const yaml = toYaml([
       {
-        name: 'read-chained-env',
+        name: 'step-1-set-var',
+        command: { command: 'echo "chained-value"' },
+        source: { type: 'local' },
+        expect: { exitCode: 0 },
+        setVars: { [key]: { stdout: true } },
+      },
+      {
+        name: 'step-2-read-var',
         command: { command: `echo $${key}` },
         source: { type: 'local' },
         expect: { exitCode: 0, stdout: { contains: 'chained-value' } },
@@ -188,36 +190,34 @@ describe('Runner integration – targetEnv within-run chaining', () => {
     ]);
 
     const result = await runTests(yaml);
-    expect(result.passed).toBe(1);
+    expect(result.passed).toBe(2);
     expect(result.failed).toBe(0);
 
     delete process.env[key];
   });
 
-  it('env var set by an earlier command test via process.env is visible to a later command test', async () => {
-    // Demonstrates the correct within-run chaining pattern:
-    // Step 1 writes a known value to process.env (like targetEnv would).
-    // Step 2 reads it via the inherited shell environment.
-    //
-    // NOTE: this does NOT use `export KEY=value` in the shell command —
-    // that only sets the var in the subshell, which exits immediately.
-    // The correct pattern is to have the runner write to process.env (targetEnv),
-    // not to rely on subshell exports.
-    const key = 'YAMLTEST_STEP_VALUE';
-    delete process.env[key];
-    process.env[key] = 'from-step-one';
+  it('setVars from an HTTP test is visible to a subsequent command test', async () => {
+    const key = 'YAMLTEST_SETVARS_HTTP_CMD';
 
     const yaml = toYaml([
       {
-        name: 'step-2-reads-env',
-        command: { command: `echo $${key}` },
+        name: 'step-1-http',
+        http: { url: baseUrl, method: 'GET', path: '/ok' },
         source: { type: 'local' },
-        expect: { exitCode: 0, stdout: { contains: 'from-step-one' } },
+        expect: { statusCode: 200 },
+        setVars: { [key]: { body: true } },
+      },
+      {
+        name: 'step-2-read-var',
+        command: { command: `echo "body=$${key}"` },
+        source: { type: 'local' },
+        expect: { exitCode: 0, stdout: { contains: 'body=ok' } },
       },
     ]);
 
     const result = await runTests(yaml);
-    expect(result.passed).toBe(1);
+    expect(result.passed).toBe(2);
+    expect(result.failed).toBe(0);
 
     delete process.env[key];
   });
@@ -227,6 +227,7 @@ describe('Runner integration – targetEnv within-run chaining', () => {
     // spawned for that test. The subshell exits, the var is gone.
     // The next test spawns a fresh subshell from process.env, which does
     // not contain KEY — so echo $KEY prints an empty line.
+    // Use setVars instead for cross-step variable passing.
     const key = 'YAMLTEST_SUBSHELL_EXPORT';
     delete process.env[key];
 

@@ -273,58 +273,16 @@ Poll a Kubernetes resource until a condition is met (or timeout).
     jsonPathExpectation:
       comparator: greaterThan
       value: 0
-    targetEnv: READY_REPLICAS    # optional: store extracted value in env var
     polling:
       timeoutSeconds: 120        # default: 60
       intervalSeconds: 5         # default: 2
       maxRetries: 24             # optional upper bound
+  setVars:                       # optional: capture the extracted value
+    READY_REPLICAS:
+      value: true
 ```
 
-#### Using `targetEnv` in subsequent tests
-
-`targetEnv` writes the extracted value into the runner's `process.env`. Any test that runs **later in the same YAML file** can reference it — the spawned shell inherits the environment automatically:
-
-```yaml
-- name: wait for deployment
-  wait:
-    target:
-      kind: Deployment
-      metadata:
-        namespace: default
-        name: my-app
-    jsonPath: "$.status.readyReplicas"
-    jsonPathExpectation:
-      comparator: greaterThan
-      value: 0
-    targetEnv: READY_REPLICAS
-
-- name: print replica count
-  command:
-    command: echo $READY_REPLICAS
-  source:
-    type: local
-  expect:
-    exitCode: 0
-    stdout:
-      contains: "1"
-```
-
-> **Shell heredoc gotcha:** if you feed YAML via a heredoc (`<<EOF`), the shell expands `$READY_REPLICAS` in the heredoc body to its value in the *parent* shell (usually empty) before YAMLTest ever sees the text. Use one of these patterns to prevent that:
->
-> ```bash
-> # 1. Escape the dollar sign
-> YAMLTest -f - <<EOF
->     command: echo \$READY_REPLICAS
-> EOF
->
-> # 2. Quote the heredoc delimiter (disables all expansion)
-> YAMLTest -f - <<'EOF'
->     command: echo $READY_REPLICAS
-> EOF
->
-> # 3. Use a file — no shell expansion at all (recommended)
-> YAMLTest -f tests.yaml
-> ```
+To use the captured value in subsequent tests, see the [setVars](#setvars--variable-passing-between-steps) section below.
 
 Selector by labels:
 
@@ -449,6 +407,131 @@ http:
   headers:
     Authorization: "Bearer ${API_TOKEN}"
 ```
+
+### setVars — variable passing between steps
+
+Extract values from a test response and store them for use in subsequent steps via `${VAR_NAME}` syntax. `setVars` requires `expect` to be present on the test — variables are only captured after all assertions pass.
+
+#### HTTP extraction sources
+
+```yaml
+- name: login
+  http:
+    url: "http://api.example.com"
+    method: POST
+    path: /login
+    body: '{"user":"admin","pass":"secret"}'
+  source:
+    type: local
+  expect:
+    statusCode: 200
+  setVars:
+    AUTH_TOKEN:
+      jsonPath: "$.token"           # extract from JSON body via JSONPath
+    SESSION_ID:
+      header: "x-session-id"       # extract a response header (case-insensitive)
+    STATUS_CODE:
+      statusCode: true             # capture the HTTP status code
+    RAW_BODY:
+      body: true                   # capture the full response body
+    CSRF_TOKEN:
+      regex:                       # extract via regex capture group from body
+        pattern: 'name="csrf" value="([^"]+)"'
+        group: 1                   # capture group index (default: 1)
+```
+
+#### Command extraction sources
+
+```yaml
+- name: read config
+  command:
+    command: "cat config.json"
+    parseJson: true                # required for jsonPath extraction
+  source:
+    type: local
+  expect:
+    exitCode: 0
+  setVars:
+    DB_HOST:
+      jsonPath: "$.database.host"  # extract from parsed JSON stdout
+    FULL_OUTPUT:
+      stdout: true                 # capture full stdout
+    ERR_OUTPUT:
+      stderr: true                 # capture full stderr
+    EXIT:
+      exitCode: true               # capture exit code
+    PID:
+      regex:                       # extract via regex from stdout or stderr
+        source: stdout             # "stdout" (default) or "stderr"
+        pattern: "PID (\\d+)"
+        group: 1
+```
+
+#### Wait extraction source
+
+```yaml
+- name: wait for deployment
+  wait:
+    target:
+      kind: Deployment
+      metadata:
+        namespace: default
+        name: my-app
+    jsonPath: "$.status.readyReplicas"
+    jsonPathExpectation:
+      comparator: greaterThan
+      value: 0
+  setVars:
+    READY_REPLICAS:
+      value: true                  # capture the jsonPath-extracted value
+```
+
+#### Chaining example: login then access protected endpoint
+
+```yaml
+- name: login
+  http:
+    url: "http://localhost:3000"
+    method: POST
+    path: /login
+    body: '{"user":"admin","pass":"secret"}'
+  source:
+    type: local
+  expect:
+    statusCode: 200
+  setVars:
+    AUTH_TOKEN:
+      jsonPath: "$.token"
+
+- name: access protected endpoint
+  http:
+    url: "http://localhost:3000"
+    method: GET
+    path: /protected
+    headers:
+      Authorization: "Bearer ${AUTH_TOKEN}"
+  source:
+    type: local
+  expect:
+    statusCode: 200
+```
+
+> **Shell heredoc gotcha:** if you feed YAML via a heredoc (`<<EOF`), the shell expands `$AUTH_TOKEN` in the heredoc body to its value in the *parent* shell (usually empty) before YAMLTest ever sees the text. Use one of these patterns to prevent that:
+>
+> ```bash
+> # 1. Escape the dollar sign
+> YAMLTest -f - <<EOF
+>     command: echo \$AUTH_TOKEN
+> EOF
+>
+> # 2. Quote the heredoc delimiter (disables all expansion)
+> YAMLTest -f - <<'EOF'
+>     command: echo $AUTH_TOKEN
+> EOF
+>
+> # 3. Use a file — no shell expansion at all (recommended)
+> YAMLTest -f tests.yaml
+> ```
 
 ---
 

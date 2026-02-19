@@ -183,7 +183,7 @@ describe('kubectl wait', () => {
     }))).resolves.toBe(true);
   });
 
-  it('stores an extracted jsonPath value in targetEnv', async () => {
+  it('stores an extracted jsonPath value via setVars', async () => {
     delete process.env.YAMLTEST_POD_PHASE;
     await executeTest(yaml({
       wait: {
@@ -194,9 +194,9 @@ describe('kubectl wait', () => {
         },
         jsonPath: '$.status.phase',
         jsonPathExpectation: { comparator: 'equals', value: 'Running' },
-        targetEnv: 'YAMLTEST_POD_PHASE',
         polling: { timeoutSeconds: 30, intervalSeconds: 2 },
       },
+      setVars: { YAMLTEST_POD_PHASE: { value: true } },
     }));
     expect(process.env.YAMLTEST_POD_PHASE).toBe('Running');
     delete process.env.YAMLTEST_POD_PHASE;
