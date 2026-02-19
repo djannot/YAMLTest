@@ -91,6 +91,54 @@ describe('executeTest – command dispatch', () => {
   });
 });
 
+// ── setVars validation ────────────────────────────────────────────────────────
+
+describe('executeTest – setVars requires expect', () => {
+  it('throws when HTTP test has setVars without expect', async () => {
+    const yaml = JSON.stringify({
+      http: { url: base, method: 'GET', path: '/' },
+      source: { type: 'local' },
+      setVars: { TOKEN: { body: true } },
+    });
+    await expect(executeTest(yaml)).rejects.toThrow(/setVars requires "expect"/);
+  });
+
+  it('throws when command test has setVars without expect', async () => {
+    const yaml = JSON.stringify({
+      command: { command: 'echo hello' },
+      source: { type: 'local' },
+      setVars: { OUT: { stdout: true } },
+    });
+    await expect(executeTest(yaml)).rejects.toThrow(/setVars requires "expect"/);
+  });
+
+  it('passes setVars through to HTTP handler on success', async () => {
+    const key = 'DISPATCH_HTTP_BODY';
+    const yaml = JSON.stringify({
+      http: { url: base, method: 'GET', path: '/' },
+      source: { type: 'local' },
+      expect: { statusCode: 200 },
+      setVars: { [key]: { body: true } },
+    });
+    await expect(executeTest(yaml)).resolves.toBe(true);
+    expect(process.env[key]).toBe('ok');
+    delete process.env[key];
+  });
+
+  it('passes setVars through to command handler on success', async () => {
+    const key = 'DISPATCH_CMD_OUT';
+    const yaml = JSON.stringify({
+      command: { command: 'echo dispatch-test' },
+      source: { type: 'local' },
+      expect: { exitCode: 0 },
+      setVars: { [key]: { stdout: true } },
+    });
+    await expect(executeTest(yaml)).resolves.toBe(true);
+    expect(process.env[key]).toBe('dispatch-test');
+    delete process.env[key];
+  });
+});
+
 // ── httpBodyComparison dispatch ───────────────────────────────────────────────
 
 describe('executeTest – httpBodyComparison dispatch', () => {

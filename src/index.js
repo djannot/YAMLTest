@@ -27,6 +27,7 @@ const {
   executeHttpBodyComparisonTest,
   filterJsonByJsonPath,
   executePodHttpRequestViaPodExec,
+  applySetVars,
 } = require('./core');
 
 module.exports = {
@@ -43,4 +44,5 @@ module.exports = {
   executeHttpBodyComparisonTest,
   filterJsonByJsonPath,
   executePodHttpRequestViaPodExec,
+  applySetVars,
 };

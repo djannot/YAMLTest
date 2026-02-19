@@ -225,23 +225,23 @@ describe('CLI e2e – failing tests', () => {
   });
 });
 
-// ── targetEnv / env-var chaining ─────────────────────────────────────────────
+// ── setVars / env-var chaining ───────────────────────────────────────────────
 //
 // When YAMLTest is invoked via a shell heredoc (<<EOF ... EOF), the shell
 // expands $VAR references in the heredoc body BEFORE passing the text to
-// YAMLTest.  This means $READY_REPLICAS in the heredoc is replaced by the
+// YAMLTest.  This means $AUTH_TOKEN in the heredoc is replaced by the
 // parent shell's value of that variable (typically empty), so YAMLTest never
-// sees the literal string "$READY_REPLICAS".
+// sees the literal string "$AUTH_TOKEN".
 //
 // The fix is either:
-//   1. Escape the dollar sign:  \$READY_REPLICAS
+//   1. Escape the dollar sign:  \$AUTH_TOKEN
 //   2. Quote the heredoc delimiter:  <<'EOF' ... EOF
 //   3. Use a YAML file (-f file.yaml) — no shell expansion at all.
 //
 // The programmatic API (runTests / executeTest) is unaffected because the
 // YAML string is never passed through a shell.
 
-describe('CLI e2e – targetEnv heredoc expansion', () => {
+describe('CLI e2e – setVars heredoc expansion', () => {
   it('unescaped $VAR in heredoc is expanded by the shell before YAMLTest sees it', () => {
     // The parent shell expands $YAMLTEST_HEREDOC_VAR to "" (unset),
     // so YAMLTest receives `echo ` and stdout is empty — the contains check fails.
