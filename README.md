@@ -213,7 +213,7 @@ Run any shell command and validate its output.
 ```yaml
 - name: check kubectl version
   command:
-    command: "kubectl version --short"
+    command: "kubectl version -short"
     parseJson: false              # parse stdout as JSON (default: false)
     env:
       MY_VAR: value               # extra environment variables
@@ -279,6 +279,52 @@ Poll a Kubernetes resource until a condition is met (or timeout).
       intervalSeconds: 5         # default: 2
       maxRetries: 24             # optional upper bound
 ```
+
+#### Using `targetEnv` in subsequent tests
+
+`targetEnv` writes the extracted value into the runner's `process.env`. Any test that runs **later in the same YAML file** can reference it — the spawned shell inherits the environment automatically:
+
+```yaml
+- name: wait for deployment
+  wait:
+    target:
+      kind: Deployment
+      metadata:
+        namespace: default
+        name: my-app
+    jsonPath: "$.status.readyReplicas"
+    jsonPathExpectation:
+      comparator: greaterThan
+      value: 0
+    targetEnv: READY_REPLICAS
+
+- name: print replica count
+  command:
+    command: echo $READY_REPLICAS
+  source:
+    type: local
+  expect:
+    exitCode: 0
+    stdout:
+      contains: "1"
+```
+
+> **Shell heredoc gotcha:** if you feed YAML via a heredoc (`<<EOF`), the shell expands `$READY_REPLICAS` in the heredoc body to its value in the *parent* shell (usually empty) before YAMLTest ever sees the text. Use one of these patterns to prevent that:
+>
+> ```bash
+> # 1. Escape the dollar sign
+> YAMLTest -f - <<EOF
+>     command: echo \$READY_REPLICAS
+> EOF
+>
+> # 2. Quote the heredoc delimiter (disables all expansion)
+> YAMLTest -f - <<'EOF'
+>     command: echo $READY_REPLICAS
+> EOF
+>
+> # 3. Use a file — no shell expansion at all (recommended)
+> YAMLTest -f tests.yaml
+> ```
 
 Selector by labels:
 

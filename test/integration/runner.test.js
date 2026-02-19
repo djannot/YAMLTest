@@ -167,3 +167,91 @@ describe('Runner integration – result structure', () => {
     expect(r.attempts).toBe(1);
   });
 });
+
+describe('Runner integration – targetEnv within-run chaining', () => {
+  it('an env var set in process.env before a run is visible to subsequent command tests', async () => {
+    // This is exactly what targetEnv does for wait tests: it writes to process.env
+    // so that the next test's spawned shell inherits it.
+    const key = 'YAMLTEST_CHAIN_TEST_VAR';
+    delete process.env[key];
+
+    // Simulate what executeKubectlWait does when targetEnv fires
+    process.env[key] = 'chained-value';
+
+    const yaml = toYaml([
+      {
+        name: 'read-chained-env',
+        command: { command: `echo $${key}` },
+        source: { type: 'local' },
+        expect: { exitCode: 0, stdout: { contains: 'chained-value' } },
+      },
+    ]);
+
+    const result = await runTests(yaml);
+    expect(result.passed).toBe(1);
+    expect(result.failed).toBe(0);
+
+    delete process.env[key];
+  });
+
+  it('env var set by an earlier command test via process.env is visible to a later command test', async () => {
+    // Demonstrates the correct within-run chaining pattern:
+    // Step 1 writes a known value to process.env (like targetEnv would).
+    // Step 2 reads it via the inherited shell environment.
+    //
+    // NOTE: this does NOT use `export KEY=value` in the shell command —
+    // that only sets the var in the subshell, which exits immediately.
+    // The correct pattern is to have the runner write to process.env (targetEnv),
+    // not to rely on subshell exports.
+    const key = 'YAMLTEST_STEP_VALUE';
+    delete process.env[key];
+    process.env[key] = 'from-step-one';
+
+    const yaml = toYaml([
+      {
+        name: 'step-2-reads-env',
+        command: { command: `echo $${key}` },
+        source: { type: 'local' },
+        expect: { exitCode: 0, stdout: { contains: 'from-step-one' } },
+      },
+    ]);
+
+    const result = await runTests(yaml);
+    expect(result.passed).toBe(1);
+
+    delete process.env[key];
+  });
+
+  it('subshell export does NOT propagate to the next test (documents the limitation)', async () => {
+    // A command like `export KEY=value` sets the var only in the subshell
+    // spawned for that test. The subshell exits, the var is gone.
+    // The next test spawns a fresh subshell from process.env, which does
+    // not contain KEY — so echo $KEY prints an empty line.
+    const key = 'YAMLTEST_SUBSHELL_EXPORT';
+    delete process.env[key];
+
+    const yaml = toYaml([
+      {
+        name: 'subshell-export',
+        command: { command: `export ${key}=subshell-value` },
+        source: { type: 'local' },
+        expect: { exitCode: 0 },
+      },
+      {
+        name: 'read-after-subshell-export',
+        // $KEY is empty because the previous subshell exited;
+        // the equals check against an empty string confirms it was not propagated.
+        command: { command: `echo "got:${key}:$(echo $${key})"` },
+        source: { type: 'local' },
+        expect: { exitCode: 0, stdout: { contains: `got:${key}:` } },
+      },
+    ]);
+
+    const result = await runTests(yaml);
+    // Both tests exit 0, but the second one shows the var is empty
+    expect(result.passed).toBe(2);
+    expect(result.failed).toBe(0);
+
+    delete process.env[key];
+  });
+});

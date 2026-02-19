@@ -225,6 +225,95 @@ describe('CLI e2e – failing tests', () => {
   });
 });
 
+// ── targetEnv / env-var chaining ─────────────────────────────────────────────
+//
+// When YAMLTest is invoked via a shell heredoc (<<EOF ... EOF), the shell
+// expands $VAR references in the heredoc body BEFORE passing the text to
+// YAMLTest.  This means $READY_REPLICAS in the heredoc is replaced by the
+// parent shell's value of that variable (typically empty), so YAMLTest never
+// sees the literal string "$READY_REPLICAS".
+//
+// The fix is either:
+//   1. Escape the dollar sign:  \$READY_REPLICAS
+//   2. Quote the heredoc delimiter:  <<'EOF' ... EOF
+//   3. Use a YAML file (-f file.yaml) — no shell expansion at all.
+//
+// The programmatic API (runTests / executeTest) is unaffected because the
+// YAML string is never passed through a shell.
+
+describe('CLI e2e – targetEnv heredoc expansion', () => {
+  it('unescaped $VAR in heredoc is expanded by the shell before YAMLTest sees it', () => {
+    // The parent shell expands $YAMLTEST_HEREDOC_VAR to "" (unset),
+    // so YAMLTest receives `echo ` and stdout is empty — the contains check fails.
+    const key = 'YAMLTEST_HEREDOC_VAR';
+    const yaml = JSON.stringify([
+      {
+        name: 'set-env',
+        command: { command: `export IGNORE=1` },
+        source: { type: 'local' },
+        expect: { exitCode: 0 },
+      },
+      {
+        name: 'read-env-unescaped',
+        // When this JSON is built in JS (not a shell heredoc) the literal string
+        // $YAMLTEST_HEREDOC_VAR reaches YAMLTest intact — the JS string is NOT
+        // subject to shell expansion.  The spawned sh then expands it from its
+        // inherited process.env, which does NOT contain the key (we deleted it).
+        command: { command: `echo $${key}` },
+        source: { type: 'local' },
+        // stdout will be empty because the key is not in process.env
+        expect: { exitCode: 0, stdout: { equals: '' } },
+      },
+    ]);
+
+    // Ensure the key is absent from the environment we pass to the CLI process
+    const r = runCli(yaml, ['-f', '-'], { [key]: undefined });
+    // The test passes (exit 0) — but stdout of the echo was empty,
+    // confirming the var was not set in the child's environment.
+    expect(r.status).toBe(0);
+  });
+
+  it('escaped \\$VAR in a shell heredoc reaches YAMLTest as a literal dollar sign', () => {
+    // This test uses the programmatic JSON path (not a real heredoc), but
+    // we embed the literal string \$KEY so that when it IS used in a heredoc
+    // the shell passes it through correctly.
+    // Here we verify the literal `$KEY` string reaches the spawned sh and is
+    // expanded from the env we inject.
+    const key = 'YAMLTEST_ESCAPED_VAR';
+    const yaml = JSON.stringify({
+      name: 'escaped-dollar',
+      command: { command: `echo $${key}` },
+      source: { type: 'local' },
+      expect: { exitCode: 0, stdout: { contains: 'escaped-value' } },
+    });
+
+    // Inject the var into the CLI child process environment
+    const r = runCli(yaml, ['-f', '-'], { [key]: 'escaped-value' });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('escaped-dollar');
+  });
+
+  it('reading a $VAR from a YAML file avoids heredoc expansion entirely', () => {
+    const key = 'YAMLTEST_FILE_VAR';
+    // Write YAML to a temp file — no shell is involved, so $KEY is preserved literally
+    const tmpFile = path.join(os.tmpdir(), `yamltest-targetenv-${Date.now()}.yaml`);
+    const yaml = JSON.stringify({
+      name: 'file-env-read',
+      command: { command: `echo $${key}` },
+      source: { type: 'local' },
+      expect: { exitCode: 0, stdout: { contains: 'file-value' } },
+    });
+    fs.writeFileSync(tmpFile, yaml);
+    try {
+      const r = runCli('', ['-f', tmpFile], { [key]: 'file-value' });
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain('file-env-read');
+    } finally {
+      fs.unlinkSync(tmpFile);
+    }
+  });
+});
+
 // ── File input ────────────────────────────────────────────────────────────────
 
 describe('CLI e2e – reading from a file', () => {
