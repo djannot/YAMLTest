@@ -65,7 +65,7 @@ describe('validateCommandExpectations – stdout', () => {
   it('passes stdout equals check', async () => {
     await expect(
       executeTest(
-        buildCommandYaml('echo -n "exact"', {
+        buildCommandYaml('echo "exact"', {
           exitCode: 0,
           stdout: { equals: 'exact' },
         })

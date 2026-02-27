@@ -599,6 +599,23 @@ async function executeHttpTest(test) {
 
   test.http.url = resolveEnvVarsInUrl(test.http.url);// Resolve environment variables in URL
   test.http.method = test.http.method || 'GET';
+
+  // If the url contains a path component (beyond '/'), extract it and prepend it to the explicit
+  // path field so that both forms below are equivalent:
+  //   form 1:  url: "http://host:80"    path: /post
+  //   form 2:  url: "http://host:80/post"              (no explicit path)
+  if (test.http.url) {
+    const parsedUrl = new URL(test.http.url);
+    const urlPath = parsedUrl.pathname + (parsedUrl.search || '');
+    if (urlPath && urlPath !== '/') {
+      // Strip the path/query from the base url
+      test.http.url = `${parsedUrl.protocol}//${parsedUrl.host}`;
+      // Prepend the extracted path to any explicit path (avoid double slashes)
+      const explicitPath = test.http.path || '';
+      test.http.path = urlPath.replace(/\/$/, '') + (explicitPath.startsWith('/') ? explicitPath : '/' + explicitPath);
+    }
+  }
+
   test.http.path = test.http.path || '/';
 
   // Resolve environment variables in headers
