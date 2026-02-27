@@ -1,6 +1,6 @@
 {
   "name": "yamltest",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Declarative YAML-based HTTP, command, and Kubernetes test runner",
   "main": "./src/index.js",
   "bin": {
