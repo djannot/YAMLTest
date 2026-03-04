@@ -612,7 +612,7 @@ async function executeHttpTest(test) {
       test.http.url = `${parsedUrl.protocol}//${parsedUrl.host}`;
       // Prepend the extracted path to any explicit path (avoid double slashes)
       const explicitPath = test.http.path || '';
-      test.http.path = urlPath.replace(/\/$/, '') + (explicitPath.startsWith('/') ? explicitPath : '/' + explicitPath);
+      test.http.path = urlPath.replace(/\/$/, '') + (explicitPath ? (explicitPath.startsWith('/') ? explicitPath : '/' + explicitPath) : '');
     }
   }
 
