@@ -51,6 +51,12 @@ beforeAll(async () => {
         return;
       }
 
+      if (url === '/status/200') {
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        res.end('ok');
+        return;
+      }
+
       if (req.method === 'POST' && url === '/echo') {
         let body = '';
         req.on('data', (chunk) => (body += chunk));
@@ -245,6 +251,65 @@ describe('HTTP integration – POST with body', () => {
         })
       )
     ).resolves.toBe(true);
+  });
+});
+
+describe('HTTP integration – url with embedded path', () => {
+  it('handles path embedded in url (no separate path field)', async () => {
+    await expect(
+      executeTest(
+        yaml({
+          http: { url: `${baseUrl}/health`, method: 'GET' },
+          source: { type: 'local' },
+          expect: { statusCode: 200 },
+        })
+      )
+    ).resolves.toBe(true);
+  });
+
+  it('does not append a trailing slash when path is embedded in url', async () => {
+    // Regression: url "http://host/status/200" was producing "http://host/status/200/" (404)
+    await expect(
+      executeTest(
+        yaml({
+          http: { url: `${baseUrl}/status/200`, method: 'GET' },
+          source: { type: 'local' },
+          expect: { statusCode: 200 },
+        })
+      )
+    ).resolves.toBe(true);
+  });
+
+  it('combines path embedded in url with an explicit path field', async () => {
+    // url: "http://host/status" + path: "/200" should hit /status/200
+    await expect(
+      executeTest(
+        yaml({
+          http: { url: `${baseUrl}/status`, method: 'GET', path: '/200' },
+          source: { type: 'local' },
+          expect: { statusCode: 200 },
+        })
+      )
+    ).resolves.toBe(true);
+  });
+
+  it('is equivalent to the separate url + path form', async () => {
+    // Both forms must hit the same endpoint and get the same response
+    const formA = executeTest(
+      yaml({
+        http: { url: baseUrl, method: 'GET', path: '/health' },
+        source: { type: 'local' },
+        expect: { statusCode: 200 },
+      })
+    );
+    const formB = executeTest(
+      yaml({
+        http: { url: `${baseUrl}/health`, method: 'GET' },
+        source: { type: 'local' },
+        expect: { statusCode: 200 },
+      })
+    );
+    await expect(Promise.all([formA, formB])).resolves.toEqual([true, true]);
   });
 });
 
