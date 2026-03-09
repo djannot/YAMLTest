@@ -202,7 +202,7 @@ const httpConfigSchema = {
   type: 'object',
   properties: {
     url: { type: 'string' },
-    method: { type: 'string', enum: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'get', 'post', 'put', 'delete', 'patch'] },
+    method: { type: 'string', enum: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS', 'get', 'post', 'put', 'delete', 'patch', 'options'] },
     path: { type: 'string' },
     headers: {
       type: 'object',
