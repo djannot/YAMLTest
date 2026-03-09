@@ -2,6 +2,7 @@
 
 const yaml = require('js-yaml');
 const { executeTest } = require('./core');
+const { validateTestDefinitions } = require('./validate');
 
 /**
  * Parse a YAML string into an array of test definitions.
@@ -123,6 +124,10 @@ async function runSingleTest(def, index) {
  */
 async function runTests(yamlString) {
   const definitions = parseTestDefinitions(yamlString);
+
+  // Validate all definitions before executing any test
+  validateTestDefinitions(definitions);
+
   const total = definitions.length;
   const results = [];
 

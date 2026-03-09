@@ -82,10 +82,31 @@ Exit codes: `0` = all passed, `1` = one or more failed.
 
 ---
 
+## Input validation
+
+All test definitions are validated against a strict schema **before** any test executes. Invalid input produces clear error messages pointing to the exact location of the problem:
+
+```
+Validation failed:
+
+  Test #1 ("login") /http/method: must be one of: GET, POST, PUT, DELETE, PATCH
+  Test #3: must define exactly one of: http, command, wait, httpBodyComparison
+  Test #5 ("check pods") /source: missing required property "selector"
+```
+
+Validation checks include:
+- Exactly one test type per definition (`http`, `command`, `wait`, or `httpBodyComparison`)
+- Required fields per test type (e.g., `command.command`, `wait.target`)
+- Value types and allowed enums (e.g., `source.type` must be `local` or `pod`)
+- Conditional requirements (e.g., `source.type: pod` requires `selector`; `setVars` requires `expect` for HTTP/command tests)
+- Unknown property detection on sub-objects (catches typos like `htpp` instead of `http`)
+
+---
+
 ## Programmatic API
 
 ```js
-const { runTests, executeTest } = require('yamltest');
+const { runTests, executeTest, validateTestDefinitions } = require('yamltest');
 
 // Run one or more tests from a YAML string (array or single object)
 const result = await runTests(yamlString);
@@ -94,6 +115,13 @@ console.log(result.passed, result.failed, result.skipped, result.total);
 
 // Run a single test (low-level)
 await executeTest(yamlString); // returns true or throws
+
+// Validate test definitions without executing them
+const yaml = require('js-yaml');
+const definitions = Array.isArray(yaml.load(yamlString))
+  ? yaml.load(yamlString)
+  : [yaml.load(yamlString)];
+validateTestDefinitions(definitions); // throws on validation errors
 ```
 
 ---
@@ -550,7 +578,8 @@ Prints full request/response details, comparison results, and kubectl commands.
 ```
 src/
   core.js       # Test execution engine (HTTP, command, wait, comparison)
-  runner.js     # Multi-test orchestration (YAML parsing, fail-fast, retry)
+  runner.js     # Multi-test orchestration (YAML parsing, validation, fail-fast, retry)
+  validate.js   # JSON Schema validation (Ajv)
   index.js      # Public API
   cli.js        # YAMLTest binary entry point
 test/

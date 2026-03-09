@@ -154,6 +154,7 @@ afterAll(() => {
 describe('kubectl wait', () => {
   it('waits for pod to be Running by name', async () => {
     await expect(executeTest(yaml({
+      source: { type: 'local' },
       wait: {
         target: {
           kind: 'Pod',
@@ -170,6 +171,7 @@ describe('kubectl wait', () => {
   it('waits for pod to be Running by label selector', async () => {
     // Label selectors return a List object; use $.items[0].status.phase
     await expect(executeTest(yaml({
+      source: { type: 'local' },
       wait: {
         target: {
           kind: 'Pod',
@@ -186,6 +188,7 @@ describe('kubectl wait', () => {
   it('stores an extracted jsonPath value via setVars', async () => {
     delete process.env.YAMLTEST_POD_PHASE;
     await executeTest(yaml({
+      source: { type: 'local' },
       wait: {
         target: {
           kind: 'Pod',
@@ -204,6 +207,7 @@ describe('kubectl wait', () => {
 
   it('uses equals comparator on a boolean jsonPath value (containerStatus ready)', async () => {
     await expect(executeTest(yaml({
+      source: { type: 'local' },
       wait: {
         target: {
           kind: 'Pod',
@@ -220,6 +224,7 @@ describe('kubectl wait', () => {
 
   it('throws when condition is never met (short timeout)', async () => {
     await expect(executeTest(yaml({
+      source: { type: 'local' },
       wait: {
         target: {
           kind: 'Pod',
@@ -235,6 +240,7 @@ describe('kubectl wait', () => {
 
   it('throws when maxRetries is exhausted before timeout', async () => {
     await expect(executeTest(yaml({
+      source: { type: 'local' },
       wait: {
         target: {
           kind: 'Pod',

@@ -1,0 +1,194 @@
+# Completeness guard fixture: uses EVERY documented field across all test types.
+# If a new field is added to core.js but not to the schema, running this fixture
+# through validateTestDefinitions() will fail.
+
+# ── HTTP test (local) with all fields ──────────────────────────────────
+- name: http-all-fields
+  retries: 2
+  source:
+    type: local
+  http:
+    url: http://example.com
+    method: POST
+    path: /api/test
+    headers:
+      Authorization: Bearer token123
+      Content-Type: application/json
+    params:
+      page: "1"
+    body:
+      key: value
+    skipSslVerification: true
+    maxRedirects: 5
+    cert: /path/to/cert.pem
+    key: /path/to/key.pem
+    ca: /path/to/ca.pem
+    scheme: https
+    port: 8443
+  expect:
+    statusCode: 200
+    body:
+      result: ok
+    bodyContains:
+      - ok
+      - value: success
+        negate: false
+        matchword: true
+    bodyRegex:
+      - "ok|success"
+      - value: "result.*ok"
+        negate: false
+    bodyJsonPath:
+      - path: $.result
+        comparator: equals
+        value: ok
+        negate: false
+    headers:
+      - name: content-type
+        comparator: contains
+        value: json
+        negate: false
+  setVars:
+    TOKEN:
+      jsonPath: $.token
+    REQ_ID:
+      header: x-request-id
+    STATUS:
+      statusCode: true
+    FULL_BODY:
+      body: true
+    CSRF:
+      regex:
+        pattern: 'csrf=([a-z0-9]+)'
+        group: 1
+
+# ── HTTP test (pod with all source fields) ────────────────────────────
+- name: http-pod-portforward
+  source:
+    type: pod
+    selector:
+      kind: Pod
+      context: my-cluster
+      metadata:
+        namespace: default
+        name: my-pod
+    container: app
+    usePortForward: true
+    usePodExec: false
+  http:
+    url: http://localhost
+    method: GET
+    path: /health
+  expect:
+    statusCode:
+      - 200
+      - 204
+
+# ── HTTP test (pod with labels selector) ──────────────────────────────
+- name: http-pod-labels
+  source:
+    type: pod
+    selector:
+      kind: Deployment
+      metadata:
+        namespace: production
+        labels:
+          app: web
+          version: v2
+  http:
+    url: http://web-service
+    method: GET
+    path: /
+  expect:
+    statusCode: 200
+
+# ── Command test (local) with all fields ──────────────────────────────
+- name: command-all-fields
+  retries: 1
+  source:
+    type: local
+  command:
+    command: echo '{"greeting":"hello"}'
+    parseJson: true
+    env:
+      MY_VAR: some-value
+    workingDir: /tmp
+  expect:
+    exitCode: 0
+    stdout:
+      contains: hello
+    stderr:
+      equals: ""
+      negate: true
+    output:
+      matches: "hello"
+    json:
+      greeting: hello
+    jsonPath:
+      - path: $.greeting
+        comparator: equals
+        value: hello
+        negate: false
+  setVars:
+    GREETING:
+      jsonPath: $.greeting
+    FULL_OUT:
+      stdout: true
+    ERR_OUT:
+      stderr: true
+    EXIT:
+      exitCode: true
+    PID:
+      regex:
+        source: stdout
+        pattern: "([0-9]+)"
+        group: 1
+
+# ── Wait test with all fields ─────────────────────────────────────────
+- name: wait-all-fields
+  source:
+    type: local
+  wait:
+    target:
+      kind: Deployment
+      context: my-cluster
+      metadata:
+        namespace: default
+        name: my-deployment
+    jsonPath: $.status.readyReplicas
+    jsonPathExpectation:
+      comparator: greaterThan
+      value: 0
+      negate: false
+    polling:
+      timeoutSeconds: 120
+      intervalSeconds: 5
+      maxRetries: 24
+  setVars:
+    READY_COUNT:
+      value: true
+
+# ── HTTP body comparison test with all fields ─────────────────────────
+- name: body-comparison-all-fields
+  source:
+    type: local
+  httpBodyComparison:
+    request1:
+      http:
+        url: http://service-v1.example.com
+        method: GET
+        path: /api/data
+      source:
+        type: local
+    request2:
+      http:
+        url: http://service-v2.example.com
+        method: GET
+        path: /api/data
+      source:
+        type: local
+    parseAsJson: true
+    delaySeconds: 2
+    removeJsonPaths:
+      - $.timestamp
+      - $.requestId

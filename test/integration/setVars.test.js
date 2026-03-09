@@ -574,7 +574,7 @@ describe('setVars integration – error cases', () => {
         source: { type: 'local' },
         setVars: { TOKEN: { body: true } },
       }))
-    ).rejects.toThrow(/setVars requires "expect" to be defined/);
+    ).rejects.toThrow(/Validation failed/);
   });
 
   it('throws when setVars is present without expect on command test', async () => {
@@ -584,7 +584,7 @@ describe('setVars integration – error cases', () => {
         source: { type: 'local' },
         setVars: { OUT: { stdout: true } },
       }))
-    ).rejects.toThrow(/setVars requires "expect" to be defined/);
+    ).rejects.toThrow(/Validation failed/);
   });
 
   it('throws when jsonPath extraction fails', async () => {

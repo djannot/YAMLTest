@@ -81,6 +81,10 @@ async function executeTest(yamlDefinition) {
     throw new Error('Invalid test definition: expected a YAML object');
   }
 
+  // Validate against schema before execution
+  const { validateTestDefinitions } = require('./validate');
+  validateTestDefinitions([testConfig]);
+
   // Dispatch to the appropriate test function based on what's defined
   if (testConfig.http) {
     debugLog('Detected HTTP test, dispatching to executeHttpTest');

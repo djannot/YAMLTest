@@ -43,7 +43,7 @@ describe('executeTest – YAML parsing', () => {
   it('throws when no recognised test key is present', async () => {
     await expect(
       executeTest(JSON.stringify({ name: 'unknown', source: { type: 'local' } }))
-    ).rejects.toThrow(/Unknown test type/);
+    ).rejects.toThrow(/Validation failed/);
   });
 });
 
@@ -87,7 +87,7 @@ describe('executeTest – command dispatch', () => {
       source: { type: 'local' },
       expect: { exitCode: 0 },
     });
-    await expect(executeTest(yaml)).rejects.toThrow(/Command must be an object/);
+    await expect(executeTest(yaml)).rejects.toThrow(/Validation failed/);
   });
 });
 
@@ -100,7 +100,7 @@ describe('executeTest – setVars requires expect', () => {
       source: { type: 'local' },
       setVars: { TOKEN: { body: true } },
     });
-    await expect(executeTest(yaml)).rejects.toThrow(/setVars requires "expect"/);
+    await expect(executeTest(yaml)).rejects.toThrow(/Validation failed/);
   });
 
   it('throws when command test has setVars without expect', async () => {
@@ -109,7 +109,7 @@ describe('executeTest – setVars requires expect', () => {
       source: { type: 'local' },
       setVars: { OUT: { stdout: true } },
     });
-    await expect(executeTest(yaml)).rejects.toThrow(/setVars requires "expect"/);
+    await expect(executeTest(yaml)).rejects.toThrow(/Validation failed/);
   });
 
   it('passes setVars through to HTTP handler on success', async () => {
@@ -144,8 +144,9 @@ describe('executeTest – setVars requires expect', () => {
 describe('executeTest – httpBodyComparison dispatch', () => {
   it('throws when request1 or request2 is missing', async () => {
     const yaml = JSON.stringify({
+      source: { type: 'local' },
       httpBodyComparison: { request1: null, request2: null },
     });
-    await expect(executeTest(yaml)).rejects.toThrow(/request1 and request2/);
+    await expect(executeTest(yaml)).rejects.toThrow(/Validation failed/);
   });
 });

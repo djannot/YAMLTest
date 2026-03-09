@@ -18,6 +18,9 @@
 // Multi-test orchestration layer
 const { runTests, parseTestDefinitions, runSingleTest } = require('./runner');
 
+// Schema validation
+const { validateTestDefinitions } = require('./validate');
+
 // Low-level core exports (single-test API)
 const {
   executeTest,
@@ -35,6 +38,7 @@ module.exports = {
   runTests,
   parseTestDefinitions,
   runSingleTest,
+  validateTestDefinitions,
 
   // Low-level single-test API (v2.js re-exports)
   executeTest,
