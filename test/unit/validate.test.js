@@ -514,16 +514,14 @@ describe('validateTestDefinitions – unknown properties', () => {
     );
   });
 
-  it('rejects unknown property at test definition level', () => {
-    expectInvalid(
-      [{
-        source: { type: 'local' },
-        http: { url: 'http://x.com' },
-        expect: { statusCode: 200 },
-        timeout: 5000,
-      }],
-      'timeout',
-    );
+  it('allows additional properties at test definition level', () => {
+    validateTestDefinitions([{
+      source: { type: 'local' },
+      http: { url: 'http://x.com' },
+      expect: { statusCode: 200 },
+      test_title: 'my custom title',
+      timeout: 5000,
+    }]);
   });
 });
 

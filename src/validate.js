@@ -502,7 +502,7 @@ const testDefinitionSchema = {
       },
     },
   ],
-  additionalProperties: false,
+  additionalProperties: true,
 };
 
 const rootSchema = {
