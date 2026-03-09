@@ -421,7 +421,7 @@ const httpBodyComparisonConfigSchema = {
 
 const testDefinitionSchema = {
   type: 'object',
-  required: ['source'],
+  required: [],
   properties: {
     name: { type: 'string' },
     retries: { type: 'integer', minimum: 0 },
@@ -458,6 +458,7 @@ const testDefinitionSchema = {
     {
       if: { required: ['http'] },
       then: {
+        required: ['source'],
         properties: {
           expect: httpExpectSchema,
           setVars: httpSetVarsSchema,
@@ -468,6 +469,7 @@ const testDefinitionSchema = {
     {
       if: { required: ['command'] },
       then: {
+        required: ['source'],
         properties: {
           expect: commandExpectSchema,
           setVars: commandSetVarsSchema,

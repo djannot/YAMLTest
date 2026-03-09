@@ -40,7 +40,6 @@ const minimalCommand = {
 };
 
 const minimalWait = {
-  source: { type: 'local' },
   wait: {
     target: {
       kind: 'Deployment',
@@ -50,7 +49,6 @@ const minimalWait = {
 };
 
 const minimalBodyComparison = {
-  source: { type: 'local' },
   httpBodyComparison: {
     request1: {
       http: { url: 'http://a.com' },
@@ -287,11 +285,26 @@ describe('validateTestDefinitions – mutual exclusivity', () => {
 // ── Required fields ──────────────────────────────────────────────────
 
 describe('validateTestDefinitions – required fields', () => {
-  it('rejects test missing source', () => {
+  it('rejects http test missing source', () => {
     expectInvalid(
       [{ http: { url: 'http://x.com' }, expect: { statusCode: 200 } }],
       'source',
     );
+  });
+
+  it('rejects command test missing source', () => {
+    expectInvalid(
+      [{ command: { command: 'echo hi' }, expect: { exitCode: 0 } }],
+      'source',
+    );
+  });
+
+  it('accepts wait test without source', () => {
+    expectValid([minimalWait]);
+  });
+
+  it('accepts httpBodyComparison test without source', () => {
+    expectValid([minimalBodyComparison]);
   });
 
   it('rejects source missing type', () => {
@@ -310,7 +323,7 @@ describe('validateTestDefinitions – required fields', () => {
 
   it('rejects wait missing target', () => {
     expectInvalid(
-      [{ source: { type: 'local' }, wait: { jsonPath: '$.x' } }],
+      [{ wait: { jsonPath: '$.x' } }],
       'target',
     );
   });
@@ -318,7 +331,6 @@ describe('validateTestDefinitions – required fields', () => {
   it('rejects httpBodyComparison missing request2', () => {
     expectInvalid(
       [{
-        source: { type: 'local' },
         httpBodyComparison: {
           request1: { http: { url: 'http://a' }, source: { type: 'local' } },
         },
