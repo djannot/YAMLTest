@@ -411,10 +411,23 @@ describe('validateTestDefinitions – type errors', () => {
         source: { type: 'local' },
         http: { url: 'http://x.com' },
         expect: {
-          headers: [{ name: 'x', comparator: 'greaterThan', value: '1' }],
+          headers: [{ name: 'x', comparator: 'startsWith', value: '1' }],
         },
       }],
     );
+  });
+
+  it('accepts greaterThan/lessThan header comparators', () => {
+    expectValid([{
+      source: { type: 'local' },
+      http: { url: 'http://x.com' },
+      expect: {
+        headers: [
+          { name: 'x-time', comparator: 'greaterThan', value: 100 },
+          { name: 'x-time', comparator: 'lessThan', value: 5000 },
+        ],
+      },
+    }]);
   });
 });
 

@@ -27,8 +27,8 @@ const headerExpectationItem = {
   required: ['name', 'comparator'],
   properties: {
     name: { type: 'string' },
-    comparator: { type: 'string', enum: ['equals', 'contains', 'matches', 'exists'] },
-    value: { type: 'string' },
+    comparator: { type: 'string', enum: ['equals', 'contains', 'matches', 'exists', 'greaterThan', 'lessThan'] },
+    value: { oneOf: [{ type: 'string' }, { type: 'number' }] },
     negate: { type: 'boolean' },
   },
   additionalProperties: false,

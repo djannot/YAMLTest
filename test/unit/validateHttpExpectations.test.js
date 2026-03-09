@@ -28,7 +28,7 @@ beforeAll(async () => {
         '/user-num':   [200, { 'content-type': 'application/json' }, JSON.stringify({ user: { id: 12345 } })],
         '/json':       [200, { 'content-type': 'application/json' }, JSON.stringify({ user: { id: 42 }, status: 'ok' })],
         '/json-bad':   [200, { 'content-type': 'application/json' }, JSON.stringify({ other: 'data' })],
-        '/hdr':        [200, { 'content-type': 'application/json; charset=utf-8', 'x-request-id': 'abc' }, 'ok'],
+        '/hdr':        [200, { 'content-type': 'application/json; charset=utf-8', 'x-request-id': 'abc', 'x-response-time': '1500' }, 'ok'],
       };
       const entry = routes[req.url];
       if (entry) {
@@ -165,5 +165,26 @@ describe('validateHttpExpectations – headers', () => {
       statusCode: 200,
       headers: [{ name: 'x-request-id', comparator: 'exists' }],
     }))).resolves.toBe(true);
+  });
+
+  it('passes lessThan on numeric header value', async () => {
+    await expect(executeTest(httpTest('/hdr', {
+      statusCode: 200,
+      headers: [{ name: 'x-response-time', comparator: 'lessThan', value: 3000 }],
+    }))).resolves.toBe(true);
+  });
+
+  it('passes greaterThan on numeric header value', async () => {
+    await expect(executeTest(httpTest('/hdr', {
+      statusCode: 200,
+      headers: [{ name: 'x-response-time', comparator: 'greaterThan', value: 1000 }],
+    }))).resolves.toBe(true);
+  });
+
+  it('throws when greaterThan comparison fails', async () => {
+    await expect(executeTest(httpTest('/hdr', {
+      statusCode: 200,
+      headers: [{ name: 'x-response-time', comparator: 'greaterThan', value: 5000 }],
+    }))).rejects.toThrow(/comparison failed/);
   });
 });
