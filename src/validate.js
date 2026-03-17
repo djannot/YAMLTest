@@ -158,6 +158,7 @@ const k8sSelector = {
   required: ['kind', 'metadata'],
   properties: {
     kind: { type: 'string' },
+    apiVersion: { type: 'string' },
     context: { type: 'string' },
     metadata: {
       type: 'object',

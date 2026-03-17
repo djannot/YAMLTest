@@ -293,6 +293,7 @@ Poll a Kubernetes resource until a condition is met (or timeout).
   wait:
     target:
       kind: Deployment
+      apiVersion: apps/v1        # optional
       metadata:
         namespace: default
         name: my-app
@@ -318,6 +319,7 @@ Selector by labels:
 wait:
   target:
     kind: Pod
+    apiVersion: v1               # optional
     metadata:
       namespace: production
       labels:

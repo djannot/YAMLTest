@@ -22,8 +22,16 @@ function debugLog(...args) {
  * @returns {object} - Object containing command argument parts
  */
 const buildSelectorArgs = (selector) => {
-  // Determine the resource kind
-  const kindArg = selector.kind.toLowerCase();
+  // Determine the resource kind, optionally qualified with API group
+  let kindArg = selector.kind.toLowerCase();
+  if (selector.apiVersion) {
+    const parts = selector.apiVersion.split('/');
+    if (parts.length === 2) {
+      // e.g. "apps/v1" → qualify as "deployments.apps" to disambiguate
+      kindArg = `${kindArg}.${parts[0]}`;
+    }
+    // core group (e.g. "v1") needs no qualification
+  }
 
   // Add namespace if specified
   const namespaceArg = selector.metadata.namespace ? `-n ${selector.metadata.namespace}` : '';
