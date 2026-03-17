@@ -181,7 +181,7 @@ async function main() {
   }
 
   if (!yamlContent || !yamlContent.trim()) {
-    process.stderr.write(c.red('Error: ') + 'Empty input – no YAML content to run.\n');
+    process.stderr.write(c.red('Error: ') + 'Empty input - no YAML content to run.\n');
     process.exit(1);
   }
 

@@ -245,6 +245,65 @@ describe('validateTestDefinitions – valid inputs', () => {
   });
 });
 
+// ── k8s selector apiVersion ──────────────────────────────────────────
+
+describe('validateTestDefinitions – k8s selector apiVersion', () => {
+  it('accepts wait target with apiVersion (group/version)', () => {
+    expectValid([{
+      wait: {
+        target: {
+          kind: 'Deployment',
+          apiVersion: 'apps/v1',
+          metadata: { name: 'my-deploy' },
+        },
+      },
+    }]);
+  });
+
+  it('accepts wait target with core apiVersion (v1)', () => {
+    expectValid([{
+      wait: {
+        target: {
+          kind: 'Pod',
+          apiVersion: 'v1',
+          metadata: { name: 'my-pod' },
+        },
+      },
+    }]);
+  });
+
+  it('accepts pod source selector with apiVersion', () => {
+    expectValid([{
+      source: {
+        type: 'pod',
+        selector: {
+          kind: 'Pod',
+          apiVersion: 'v1',
+          metadata: { name: 'my-pod' },
+        },
+      },
+      http: { url: 'http://localhost' },
+      expect: { statusCode: 200 },
+    }]);
+  });
+
+  it('accepts wait target without apiVersion (still optional)', () => {
+    expectValid([minimalWait]);
+  });
+
+  it('rejects apiVersion as a non-string', () => {
+    expectInvalid([{
+      wait: {
+        target: {
+          kind: 'Deployment',
+          apiVersion: 123,
+          metadata: { name: 'my-deploy' },
+        },
+      },
+    }], 'apiVersion');
+  });
+});
+
 // ── Test type mutual exclusivity ─────────────────────────────────────
 
 describe('validateTestDefinitions – mutual exclusivity', () => {
