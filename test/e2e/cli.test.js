@@ -314,6 +314,105 @@ describe('CLI e2e – setVars heredoc expansion', () => {
   });
 });
 
+// ── --check (schema validation only) ─────────────────────────────────────────
+
+describe('CLI e2e – --check', () => {
+  it('exits 0 and prints "ok" for a valid HTTP test definition', () => {
+    const yaml = JSON.stringify({
+      name: 'valid-http',
+      http: { url: 'https://example.com', method: 'GET', path: '/get' },
+      source: { type: 'local' },
+      expect: { statusCode: 200 },
+    });
+    const r = runCli(yaml, ['--check', '-f', '-']);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('ok');
+  });
+
+  it('exits 0 and prints "ok" for a valid command test definition', () => {
+    const yaml = JSON.stringify({
+      name: 'valid-cmd',
+      command: { command: 'echo hello' },
+      source: { type: 'local' },
+      expect: { exitCode: 0 },
+    });
+    const r = runCli(yaml, ['--check', '-f', '-']);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('ok');
+  });
+
+  it('exits 0 when the YAML contains unresolved ${ENV_VAR} references', () => {
+    const yaml = JSON.stringify({
+      name: 'env-ref',
+      http: { url: 'https://${PROXY_IP}', method: 'GET', path: '/get' },
+      source: { type: 'local' },
+      expect: { statusCode: 200 },
+    });
+    const r = runCli(yaml, ['--check', '-f', '-']);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('ok');
+  });
+
+  it('exits 1 and reports the unknown property for an invalid expect field', () => {
+    const yaml = JSON.stringify({
+      name: 'bad-expect',
+      http: { url: 'https://example.com', method: 'GET', path: '/' },
+      source: { type: 'local' },
+      expect: { status: 200 },   // "status" is not a valid field
+    });
+    const r = runCli(yaml, ['--check', '-f', '-']);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('invalid');
+    expect(r.stderr).toContain('status');
+  });
+
+  it('exits 1 and reports the missing test-type when none is defined', () => {
+    const yaml = JSON.stringify({
+      name: 'no-type',
+      source: { type: 'local' },
+      expect: { statusCode: 200 },
+    });
+    const r = runCli(yaml, ['--check', '-f', '-']);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('invalid');
+  });
+
+  it('exits 1 on multiple tests where one has an invalid schema', () => {
+    const yaml = JSON.stringify([
+      { name: 'ok', http: { url: 'https://example.com', method: 'GET', path: '/' }, source: { type: 'local' }, expect: { statusCode: 200 } },
+      { name: 'bad', http: { url: 'https://example.com', method: 'GET', path: '/' }, source: { type: 'local' }, expect: { status: 200 } },
+    ]);
+    const r = runCli(yaml, ['--check', '-f', '-']);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('bad');
+  });
+
+  it('exits 1 on empty input', () => {
+    const r = runCli('', ['--check', '-f', '-']);
+    expect(r.status).toBe(1);
+  });
+
+  it('exits 1 on invalid YAML syntax', () => {
+    const r = runCli('{ broken: [', ['--check', '-f', '-']);
+    expect(r.status).toBe(1);
+  });
+
+  it('does not execute tests — no HTTP requests are made', () => {
+    // Points at a port that is definitely not listening
+    const yaml = JSON.stringify({
+      name: 'unreachable',
+      http: { url: 'http://127.0.0.1:1', method: 'GET', path: '/' },
+      source: { type: 'local' },
+      expect: { statusCode: 200 },
+    });
+    const r = runCli(yaml, ['--check', '-f', '-']);
+    // Structure is valid → 0, and no connection error in stderr
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('ok');
+    expect(r.stderr).toBe('');
+  });
+});
+
 // ── File input ────────────────────────────────────────────────────────────────
 
 describe('CLI e2e – reading from a file', () => {

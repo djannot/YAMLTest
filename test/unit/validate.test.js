@@ -588,18 +588,18 @@ describe('validateTestDefinitions – edge cases', () => {
     expectInvalid([], 'Validation failed');
   });
 
-  it('accepts HTTP test without expect (no setVars)', () => {
-    expectValid([{
+  it('rejects HTTP test without expect', () => {
+    expectInvalid([{
       source: { type: 'local' },
       http: { url: 'http://x.com' },
-    }]);
+    }], 'expect');
   });
 
-  it('accepts command test without expect (no setVars)', () => {
-    expectValid([{
+  it('rejects command test without expect', () => {
+    expectInvalid([{
       source: { type: 'local' },
       command: { command: 'echo hello' },
-    }]);
+    }], 'expect');
   });
 
   it('accepts empty expect object for HTTP', () => {

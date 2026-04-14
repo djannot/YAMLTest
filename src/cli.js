@@ -36,7 +36,7 @@ const c = {
 // ── Argument parsing ──────────────────────────────────────────────────────────
 function parseArgs(argv) {
   const args = argv.slice(2); // strip node + script
-  const opts = { file: null };
+  const opts = { file: null, check: false };
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '-f' || args[i] === '--file') {
@@ -46,6 +46,8 @@ function parseArgs(argv) {
       opts.file = args[i].slice(3);
     } else if (args[i] === '--help' || args[i] === '-h') {
       opts.help = true;
+    } else if (args[i] === '--check') {
+      opts.check = true;
     }
   }
 
@@ -75,6 +77,7 @@ function printUsage() {
       '',
       c.bold('OPTIONS'),
       '  -f, --file <path|->   YAML file to run, or - for stdin',
+      '  --check               Validate YAML structure only; do not run tests',
       '  -h, --help            Show this help',
       '',
       c.bold('ENVIRONMENT'),
@@ -183,6 +186,20 @@ async function main() {
   if (!yamlContent || !yamlContent.trim()) {
     process.stderr.write(c.red('Error: ') + 'Empty input – no YAML content to run.\n');
     process.exit(1);
+  }
+
+  if (opts.check) {
+    try {
+      const { parseTestDefinitions } = require('./runner');
+      const { validateTestDefinitions } = require('./validate');
+      const defs = parseTestDefinitions(yamlContent);
+      validateTestDefinitions(defs);
+      process.stdout.write(c.green('ok') + '\n');
+      process.exit(0);
+    } catch (err) {
+      process.stderr.write(c.red('invalid: ') + err.message + '\n');
+      process.exit(1);
+    }
   }
 
   let result;

@@ -1067,6 +1067,26 @@ async function executePodHttpRequestViaPodExec(test) {
       targetUrl += httpConfig.path;
     }
 
+    // If the URL is an IP address and a Host header is set, use --resolve so curl
+    // uses the hostname for TLS SNI — matching how axios behaves for local requests.
+    const parsedTargetUrl = new URL(targetUrl);
+    const hostHeader = httpConfig.headers && Object.entries(httpConfig.headers).find(
+      ([k]) => k.toLowerCase() === 'host'
+    );
+    const urlHostIsIp = net.isIP(parsedTargetUrl.hostname) !== 0;
+    if (urlHostIsIp && hostHeader) {
+      const sniHostname = hostHeader[1];
+      const originalIp = parsedTargetUrl.hostname;
+      const port = parsedTargetUrl.port || (parsedTargetUrl.protocol === 'https:' ? '443' : '80');
+      // Rewrite the URL to use the hostname so curl sends SNI correctly
+      parsedTargetUrl.hostname = sniHostname;
+      parsedTargetUrl.port = port;
+      targetUrl = parsedTargetUrl.toString();
+      // --resolve maps hostname:port to the original IP so the connection still goes to the right place
+      curlCmd += ` --resolve '${sniHostname}:${port}:${originalIp}'`;
+      debugLog(`Added --resolve for SNI: ${sniHostname}:${port}:${originalIp}`);
+    }
+
     curlCmd += ` '${targetUrl}'`;
 
     // Build kubectl exec command

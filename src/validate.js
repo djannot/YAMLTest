@@ -458,18 +458,41 @@ const testDefinitionSchema = {
     {
       if: { required: ['http'] },
       then: {
-        required: ['source'],
+        required: ['source', 'expect'],
         properties: {
           expect: httpExpectSchema,
           setVars: httpSetVarsSchema,
         },
       },
     },
+    // HTTP: url is required unless source is a local Service (auto-discovery)
+    {
+      if: { required: ['http'] },
+      then: {
+        anyOf: [
+          { type: 'object', properties: { http: { type: 'object', required: ['url'] } } },
+          {
+            type: 'object',
+            properties: {
+              source: {
+                type: 'object',
+                properties: {
+                  type: { const: 'local' },
+                  selector: { type: 'object', properties: { kind: { const: 'Service' } }, required: ['kind'] },
+                },
+                required: ['type', 'selector'],
+              },
+            },
+          },
+        ],
+        errorMessage: 'http.url is required (or use source.selector.kind: Service for auto-discovery)',
+      },
+    },
     // Command: validate expect and setVars shapes
     {
       if: { required: ['command'] },
       then: {
-        required: ['source'],
+        required: ['source', 'expect'],
         properties: {
           expect: commandExpectSchema,
           setVars: commandSetVarsSchema,
@@ -533,9 +556,24 @@ function formatValidationErrors(errors, definitions) {
   const seen = new Set();
   const meaningful = [];
 
+  // Collect instance paths that have a custom errorMessage so we can suppress
+  // the raw sub-errors from their anyOf branches (they are noise).
+  const errorMessagePaths = errors
+    .filter(e => e.keyword === 'errorMessage')
+    .map(e => e.instancePath);
+
+  // Returns true when a custom errorMessage covers this instancePath (exact or ancestor).
+  const coveredByErrorMessage = (instancePath) =>
+    errorMessagePaths.some(p => instancePath === p || instancePath.startsWith(p + '/'));
+
   for (const err of errors) {
     // Skip generic wrapper messages that aren't actionable
     if (err.keyword === 'if' || err.keyword === 'ifThen') continue;
+
+    // Skip raw sub-errors that originate inside an anyOf branch when a custom
+    // errorMessage already covers the same instance path — the errorMessage is
+    // the actionable line; the branch sub-errors are misleading noise.
+    if (err.schemaPath.includes('/anyOf/') && coveredByErrorMessage(err.instancePath)) continue;
 
     const key = `${err.instancePath}|${err.keyword}|${err.message}`;
     if (seen.has(key)) continue;
