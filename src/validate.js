@@ -81,6 +81,7 @@ const bodyRegexItem = {
       properties: {
         value: { type: 'string' },
         negate: { type: 'boolean' },
+        caseInsensitive: { type: 'boolean' },
       },
       additionalProperties: false,
     },
@@ -96,6 +97,7 @@ const bodyRegexSchema = {
       properties: {
         value: { type: 'string' },
         negate: { type: 'boolean' },
+        caseInsensitive: { type: 'boolean' },
       },
       additionalProperties: false,
     },

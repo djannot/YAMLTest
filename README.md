@@ -171,7 +171,7 @@ Test any HTTP endpoint locally or from within a Kubernetes pod.
     statusCode: 200                   # or [200, 201, 202]
     body: "exact body match"
     bodyContains: "substring"         # or array, or {value, negate, matchword}
-    bodyRegex: "pattern.*"            # or {value, negate}
+    bodyRegex: "pattern.*"            # or {value, negate, caseInsensitive}
     bodyJsonPath:
       - path: "$.user.id"
         comparator: equals

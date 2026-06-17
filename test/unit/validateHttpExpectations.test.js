@@ -116,6 +116,14 @@ describe('validateHttpExpectations – bodyRegex', () => {
   it('supports negated bodyRegex', async () => {
     await expect(executeTest(httpTest('/body-clean', { statusCode: 200, bodyRegex: { value: 'error', negate: true } }))).resolves.toBe(true);
   });
+
+  it('is case sensitive by default', async () => {
+    await expect(executeTest(httpTest('/body-clean', { statusCode: 200, bodyRegex: 'EVERYTHING' }))).rejects.toThrow(/does not match regex/);
+  });
+
+  it('supports caseInsensitive bodyRegex', async () => {
+    await expect(executeTest(httpTest('/body-clean', { statusCode: 200, bodyRegex: { value: 'EVERYTHING', caseInsensitive: true } }))).resolves.toBe(true);
+  });
 });
 
 // ── bodyJsonPath ──────────────────────────────────────────────────────────────

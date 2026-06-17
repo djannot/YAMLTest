@@ -1537,8 +1537,9 @@ function validateHttpExpectations(response, expect, testName) {
       const regexNegate = typeof bodyRegexItem === 'object' && 'negate' in bodyRegexItem && bodyRegexItem.negate;
       const regexValue = bodyRegexItem.value || bodyRegexItem;
       const negate = regexNegate ? bodyRegexItem.negate : false;
+      const caseInsensitive = typeof bodyRegexItem === 'object' && bodyRegexItem.caseInsensitive === true;
 
-      const re = new RegExp(regexValue);
+      const re = new RegExp(regexValue, caseInsensitive ? 'i' : '');
       const matches = re.test(rawBody);
 
       if (negate ? matches : !matches) {
