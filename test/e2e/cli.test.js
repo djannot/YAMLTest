@@ -247,6 +247,24 @@ describe('CLI e2e – failing tests', () => {
     expect(r.stdout).toContain('[2 attempts]'); // passed on the 2nd attempt
   });
 
+  it('--retries 0 forces a single attempt, overriding the test\'s own retries', () => {
+    // A command that would pass on its 2nd run; with the test's retries:5 it would
+    // normally go green, but --retries 0 forces one attempt so it fails fast.
+    const counter = path.join(os.tmpdir(), `yt-cli-override-${process.pid}-${Date.now()}`);
+    try { fs.unlinkSync(counter); } catch (_) {}
+    const yaml = JSON.stringify({
+      name: 'passes-on-second-run',
+      command: { command: `c=$(cat ${counter} 2>/dev/null || echo 0); c=$((c+1)); echo $c > ${counter}; [ $c -ge 2 ]` },
+      source: { type: 'local' },
+      expect: { exitCode: 0 },
+      retries: 5,
+    });
+    const r = runCli(yaml, ['-f', '-', '--retries', '0']);
+    try { fs.unlinkSync(counter); } catch (_) {}
+    expect(r.status).toBe(1);
+    expect(r.stdout).toContain('1 failed');
+  });
+
   it('exits 1 on empty stdin', () => {
     const r = runCli('');
     expect(r.status).toBe(1);

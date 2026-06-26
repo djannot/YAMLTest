@@ -177,6 +177,17 @@ describe('runTests – retry', () => {
     expect(result.results[0].attempts).toBe(1);
   });
 
+  it('lets a run-level retries override win over the per-test retries', async () => {
+    const result = await runTests(
+      JSON.stringify([
+        { name: 'always-fail', command: { command: 'false' }, source: { type: 'local' }, expect: { exitCode: 0 }, retries: 5 },
+      ]),
+      { retries: 0 } // e.g. CLI --retries 0
+    );
+    expect(result.failed).toBe(1);
+    expect(result.results[0].attempts).toBe(1); // override forced a single attempt
+  });
+
   it('honours the YAMLTEST_RETRIES env default when a test omits retries', async () => {
     const prev = process.env.YAMLTEST_RETRIES;
     process.env.YAMLTEST_RETRIES = '2'; // override the suite's pinned 0

@@ -44,6 +44,11 @@ function parseArgs(argv) {
       i++;
     } else if (args[i].startsWith('-f=')) {
       opts.file = args[i].slice(3);
+    } else if (args[i] === '--retries') {
+      opts.retries = parseInt(args[i + 1], 10);
+      i++;
+    } else if (args[i].startsWith('--retries=')) {
+      opts.retries = parseInt(args[i].slice('--retries='.length), 10);
     } else if (args[i] === '--help' || args[i] === '-h') {
       opts.help = true;
     } else if (args[i] === '--check') {
@@ -77,6 +82,9 @@ function printUsage() {
       '',
       c.bold('OPTIONS'),
       '  -f, --file <path|->   YAML file to run, or - for stdin',
+      '  --retries <n>         Force the retry count for every test, overriding the',
+      '                        per-test `retries` and the default. Use --retries 0 to',
+      '                        run once when debugging a failure.',
       '  --check               Validate YAML structure only; do not run tests',
       '  -h, --help            Show this help',
       '',
@@ -248,9 +256,14 @@ async function main() {
     }
   }
 
+  const runOptions = {};
+  if (Number.isFinite(opts.retries) && opts.retries >= 0) {
+    runOptions.retries = opts.retries;
+  }
+
   let result;
   try {
-    result = await runTests(yamlContent);
+    result = await runTests(yamlContent, runOptions);
   } catch (err) {
     process.stderr.write(c.red('Error: ') + err.message + '\n');
     process.exit(1);

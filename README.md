@@ -71,11 +71,22 @@ USAGE
 
 OPTIONS
   -f, --file <path|->   YAML file to run, or - for stdin
+  --retries <n>         Force the retry count for every test, overriding the
+                        per-test `retries` and the default. Use --retries 0 to
+                        run once when debugging a failure.
+  --check               Validate YAML structure only; do not run tests
   -h, --help            Show this help
 
 ENVIRONMENT
   DEBUG_MODE=true       Enable verbose debug logging
   NO_COLOR=1            Disable ANSI colour output
+```
+
+When a test fails and you want to debug it, run the same file with `--retries 0`
+so it executes exactly once instead of retrying up to the default 120 times:
+
+```bash
+yamltest -f test.yaml --retries 0
 ```
 
 Exit codes: `0` = all passed, `1` = one or more failed.

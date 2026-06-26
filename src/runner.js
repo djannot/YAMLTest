@@ -139,11 +139,16 @@ async function runConsecutive(yamlStr, consecutive) {
  *
  * @param {object} def - Normalised test definition
  * @param {number} index - 0-based index in the test array (for labelling)
+ * @param {object} [overrides] - Run-level overrides that win over the definition
+ *                  and env defaults. Supported: `retries` (number). Used by the
+ *                  CLI `--retries` flag, mainly to force a single run while debugging.
  * @returns {Promise<TestResult>}
  */
-async function runSingleTest(def, index) {
+async function runSingleTest(def, index, overrides = {}) {
   const cfg = defaults();
-  const retries = typeof def.retries === 'number' ? def.retries : cfg.retries;
+  const retries = (overrides && typeof overrides.retries === 'number')
+    ? overrides.retries
+    : (typeof def.retries === 'number' ? def.retries : cfg.retries);
   const consecutive = typeof def.consecutive === 'number' && def.consecutive >= 1 ? def.consecutive : 1;
   const perAttemptTimeout = typeof def.timeout === 'number' ? def.timeout : cfg.timeoutMs;
   const retryIntervalMs = cfg.retryIntervalMs;
@@ -211,6 +216,9 @@ async function runSingleTest(def, index) {
  * Stops at the first failure (fail-fast).
  *
  * @param {string} yamlString - Raw YAML content (single object or array)
+ * @param {object} [options] - Run-level overrides passed to each test. Supported:
+ *                  `retries` (number) — forces the retry count for every test,
+ *                  overriding per-test `retries` and the env default.
  * @returns {Promise<RunResult>}
  *
  * @typedef {object} RunResult
@@ -227,7 +235,7 @@ async function runSingleTest(def, index) {
  * @property {number}      durationMs - Wall-clock time in milliseconds
  * @property {number}      attempts   - Number of attempts made (retry support)
  */
-async function runTests(yamlString) {
+async function runTests(yamlString, options = {}) {
   const definitions = parseTestDefinitions(yamlString);
 
   // Validate all definitions before executing any test
@@ -238,7 +246,7 @@ async function runTests(yamlString) {
 
   for (let i = 0; i < definitions.length; i++) {
     const def = normaliseDefinition(definitions[i]);
-    const result = await runSingleTest(def, i);
+    const result = await runSingleTest(def, i, options);
     results.push(result);
 
     if (!result.passed) {
