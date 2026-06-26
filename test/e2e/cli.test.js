@@ -200,6 +200,21 @@ describe('CLI e2e – failing tests', () => {
     expect(r.stdout).toContain('should-fail');
   });
 
+  it('prints the observed request/response on failure (no DEBUG_MODE re-run)', () => {
+    const yaml = JSON.stringify({
+      name: 'observed-http',
+      http: { url: base(), method: 'GET', path: '/health' },
+      source: { type: 'local' },
+      expect: { statusCode: 404 }, // /health returns 200 → fails
+    });
+    const r = runCli(yaml);
+    expect(r.status).toBe(1);
+    expect(r.stdout).toContain('1 failed');
+    // The actual status that caused the failure is surfaced inline.
+    expect(r.stdout).toContain('status 200');
+    expect(r.stdout).toContain('/health');
+  });
+
   it('exits 1 and shows skipped count on fail-fast', () => {
     const yaml = JSON.stringify([
       { name: 'pass',    http: { url: base(), method: 'GET', path: '/health' }, source: { type: 'local' }, expect: { statusCode: 200 } },

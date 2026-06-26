@@ -7,8 +7,11 @@
  * Uses real local shell commands (fast, no network, no mock complexity).
  */
 
-import { describe, it, expect } from 'vitest';
-import { runTests, parseTestDefinitions } from '../../src/runner.js';
+import { describe, it, expect, afterEach } from 'vitest';
+import os from 'os';
+import path from 'path';
+import fs from 'fs';
+import { runTests, parseTestDefinitions, parseDuration } from '../../src/runner.js';
 
 // ── parseTestDefinitions ──────────────────────────────────────────────────────
 
@@ -160,16 +163,125 @@ describe('runTests – retry', () => {
     expect(result.results[0].attempts).toBe(3); // 1 + 2 retries
   });
 
-  it('does not retry when retries is 0 (default)', async () => {
+  it('does not retry when retries is 0', async () => {
     const yaml = JSON.stringify([
       {
         name: 'no-retry',
         command: { command: 'false' },
         source: { type: 'local' },
         expect: { exitCode: 0 },
+        retries: 0,
       },
     ]);
     const result = await runTests(yaml);
     expect(result.results[0].attempts).toBe(1);
+  });
+
+  it('honours the YAMLTEST_RETRIES env default when a test omits retries', async () => {
+    const prev = process.env.YAMLTEST_RETRIES;
+    process.env.YAMLTEST_RETRIES = '2'; // override the suite's pinned 0
+    try {
+      const result = await runTests(JSON.stringify([
+        { name: 'env-default', command: { command: 'false' }, source: { type: 'local' }, expect: { exitCode: 0 } },
+      ]));
+      expect(result.results[0].attempts).toBe(3); // 1 + 2 env-default retries
+    } finally {
+      process.env.YAMLTEST_RETRIES = prev;
+    }
+  });
+});
+
+// ── parseDuration ─────────────────────────────────────────────────────────────
+
+describe('parseDuration', () => {
+  it('passes through plain numbers as milliseconds', () => {
+    expect(parseDuration(500)).toBe(500);
+    expect(parseDuration(0)).toBe(0);
+  });
+  it('parses duration strings with units', () => {
+    expect(parseDuration('500ms')).toBe(500);
+    expect(parseDuration('30s')).toBe(30000);
+    expect(parseDuration('3m')).toBe(180000);
+    expect(parseDuration('1h')).toBe(3600000);
+  });
+  it('treats a unitless string as milliseconds', () => {
+    expect(parseDuration('250')).toBe(250);
+  });
+  it('returns null for absent or unparseable values', () => {
+    expect(parseDuration(undefined)).toBeNull();
+    expect(parseDuration(null)).toBeNull();
+    expect(parseDuration('soon')).toBeNull();
+  });
+});
+
+// ── consecutive ───────────────────────────────────────────────────────────────
+
+describe('runTests – consecutive', () => {
+  afterEach(() => { /* temp files are unique per test */ });
+
+  it('runs the test `consecutive` times in a single passing attempt', async () => {
+    const counter = path.join(os.tmpdir(), `yt-consec-pass-${process.pid}-${Date.now()}`);
+    if (fs.existsSync(counter)) fs.unlinkSync(counter);
+    const result = await runTests(JSON.stringify([
+      {
+        name: 'consec-pass',
+        command: { command: `echo x >> ${counter}` },
+        source: { type: 'local' },
+        expect: { exitCode: 0 },
+        consecutive: 3,
+        retries: 0,
+      },
+    ]));
+    expect(result.passed).toBe(1);
+    const runs = fs.readFileSync(counter, 'utf8').trim().split('\n').length;
+    expect(runs).toBe(3); // executeTest invoked 3 times in the one attempt
+    fs.unlinkSync(counter);
+  });
+
+  it('fails the attempt and short-circuits when a consecutive run fails', async () => {
+    const counter = path.join(os.tmpdir(), `yt-consec-fail-${process.pid}-${Date.now()}`);
+    if (fs.existsSync(counter)) fs.unlinkSync(counter);
+    const result = await runTests(JSON.stringify([
+      {
+        name: 'consec-fail',
+        command: { command: `echo x >> ${counter}; false` },
+        source: { type: 'local' },
+        expect: { exitCode: 0 },
+        consecutive: 3,
+        retries: 0,
+      },
+    ]));
+    expect(result.failed).toBe(1);
+    const runs = fs.readFileSync(counter, 'utf8').trim().split('\n').length;
+    expect(runs).toBe(1); // stopped at the first failing run, did not continue the group
+    fs.unlinkSync(counter);
+  });
+});
+
+// ── maxtime budget ──────────────────────────────────────────────────────────
+
+describe('runTests – maxtime budget', () => {
+  it('stops retrying once the maxtime budget is exceeded', async () => {
+    const prev = process.env.YAMLTEST_RETRY_INTERVAL_MS;
+    process.env.YAMLTEST_RETRY_INTERVAL_MS = '40';
+    try {
+      const start = Date.now();
+      const result = await runTests(JSON.stringify([
+        {
+          name: 'budget',
+          command: { command: 'false' },
+          source: { type: 'local' },
+          expect: { exitCode: 0 },
+          retries: 1000,     // would run a long time without a budget
+          maxtime: '200ms',  // ← circuit-breaker
+        },
+      ]));
+      expect(result.failed).toBe(1);
+      expect(result.results[0].timedOut).toBe(true);
+      expect(result.results[0].attempts).toBeLessThan(1001);
+      expect(Date.now() - start).toBeLessThan(5000);
+    } finally {
+      process.env.YAMLTEST_RETRY_INTERVAL_MS = prev;
+    }
   });
 });

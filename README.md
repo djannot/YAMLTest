@@ -399,11 +399,28 @@ expect:
 
 ## Advanced features
 
-### Retry on failure
+### Run control: retries, consecutive, timeout, maxtime
+
+Each test definition accepts four optional run-control knobs. All have defaults
+tuned for waiting on eventually-consistent systems, and all defaults are
+overridable per run via environment variables (so you never have to edit the
+test to tune them):
+
+| Field | Meaning | Default | Env override |
+|-------|---------|---------|--------------|
+| `retries` | Max retry attempts **after** the first | `120` | `YAMLTEST_RETRIES` |
+| `consecutive` | Successful runs required **per attempt** (all must pass in a row) | `1` | — |
+| `timeout` | Per-attempt cap, in ms (a hung attempt is abandoned and retried) | `10000` | `YAMLTEST_TIMEOUT_MS` |
+| `maxtime` | Wall-clock cap on the **whole** retry loop — the circuit breaker | `max(180000, timeout + 60000)` | `YAMLTEST_MAXTIME_MS` (floor) |
+
+`maxtime` accepts either a number of milliseconds or a duration string
+(`"500ms"`, `"30s"`, `"3m"`, `"1h"`). The retry loop stops at whichever comes
+first: `retries` exhausted **or** `maxtime` elapsed. The pause between retries
+defaults to 1000ms (`YAMLTEST_RETRY_INTERVAL_MS`).
 
 ```yaml
 - name: flaky service
-  retries: 5            # retry up to 5 times, 500ms between attempts
+  retries: 5            # retry up to 5 times after the first attempt
   http:
     url: "http://flaky-service"
     method: GET
@@ -412,7 +429,30 @@ expect:
     type: local
   expect:
     statusCode: 200
+
+- name: routing is stable, not just lucky
+  consecutive: 3        # must return the expected provider 3 times in a row
+  retries: 10
+  http: { url: "http://gw", method: POST, path: /failover }
+  source: { type: local }
+  expect:
+    bodyJsonPath:
+      - path: "$.model"
+        comparator: contains
+        value: "gemini"
+
+- name: long browser/OAuth flow
+  timeout: 360000       # one attempt may take up to 6 minutes
+  maxtime: "8m"         # cap the whole retry loop at 8 minutes
+  command: { command: "./run-oauth-flow.sh" }
+  source: { type: local }
+  expect: { exitCode: 0 }
 ```
+
+On failure, the CLI prints the **observed** request/response (or command result)
+from the last attempt inline — no need to re-run under `DEBUG_MODE` to see why a
+test failed. Bodies and outputs are truncated so a large response can't flood the
+log.
 
 ### Multiple tests in one file
 

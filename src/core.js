@@ -17,6 +17,19 @@ function debugLog(...args) {
 }
 
 /**
+ * Attach an "observed" snapshot (the actual request/response or command result)
+ * to an Error so callers can surface *why* a test failed without re-running it
+ * under DEBUG_MODE. Only attaches once and never overwrites an existing snapshot
+ * (the innermost failure wins).
+ */
+function attachObserved(error, observed) {
+  if (error && typeof error === 'object' && observed && !error.observed) {
+    try { error.observed = observed; } catch (_) { /* frozen error - ignore */ }
+  }
+  return error;
+}
+
+/**
  * Builds kubectl command argument parts for resource selection
  * @param {object} selector - The Kubernetes selector
  * @returns {object} - Object containing command argument parts
@@ -642,6 +655,8 @@ async function executeHttpTest(test) {
     testName += ` (via pod ${test.source.selector.metadata.namespace || 'default'}/${test.source.selector.metadata.name || '<selector>'})`;
   }
 
+  let response;
+
   try {
     debugLog(`Executing HTTP test: ${testName}`);
     debugLog(`Request details: ${JSON.stringify({
@@ -652,8 +667,6 @@ async function executeHttpTest(test) {
       body: test.http.body || null,
       sourceType: test.source.type
     }, null, 2)}`);
-
-    let response;
 
     if (test.source.type === 'local') {
       debugLog('Using local HTTP client');
@@ -688,7 +701,19 @@ async function executeHttpTest(test) {
   } catch (error) {
     debugLog(`Test failed: ${testName}`);
     debugLog(error?.message || String(error));
-    throw error; // Re-throw to ensure Mocha catches the failure
+    attachObserved(error, {
+      type: 'http',
+      request: {
+        method: test.http.method,
+        url: (test.http.url || '') + (test.http.path || ''),
+        headers: test.http.headers || {},
+        body: test.http.body || null,
+      },
+      response: response
+        ? { statusCode: response.statusCode, headers: response.headers, body: response.body }
+        : null,
+    });
+    throw error; // Re-throw so the runner records the failure (and the observed snapshot)
   }
   return true;
 }
@@ -1837,6 +1862,8 @@ async function executeCommandTest(test) {
     testName += ` (via pod ${test.source.selector.metadata.namespace || 'default'}/${test.source.selector.metadata.name || '<selector>'})`;
   }
 
+  let result;
+
   try {
     debugLog(`Executing command test: ${testName}`);
     debugLog(`Command details: ${JSON.stringify({
@@ -1846,8 +1873,6 @@ async function executeCommandTest(test) {
       sourceType: test.source.type,
       parseJson: commandConfig.parseJson || false
     }, null, 2)}`);
-
-    let result;
 
     if (test.source.type === 'local') {
       debugLog('Using local command execution');
@@ -1879,6 +1904,13 @@ async function executeCommandTest(test) {
   } catch (error) {
     debugLog(`✗ Command test failed: ${testName}`);
     debugLog(`Error: ${error.message}`);
+    attachObserved(error, {
+      type: 'command',
+      command: commandConfig.command,
+      result: result
+        ? { exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr }
+        : null,
+    });
     throw error;
   }
 }

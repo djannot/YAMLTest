@@ -426,7 +426,11 @@ const testDefinitionSchema = {
   required: [],
   properties: {
     name: { type: 'string' },
+    test_title: { type: 'string' },
     retries: { type: 'integer', minimum: 0 },
+    consecutive: { type: 'integer', minimum: 1 },
+    timeout: { type: 'integer', minimum: 0 },
+    maxtime: { oneOf: [{ type: 'integer', minimum: 0 }, { type: 'string' }] },
     source: sourceSchema,
     http: httpConfigSchema,
     command: commandConfigSchema,

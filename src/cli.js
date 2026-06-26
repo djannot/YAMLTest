@@ -118,6 +118,44 @@ function formatDuration(ms) {
   return `${(ms / 1000).toFixed(2)}s`;
 }
 
+// Render an "observed" snapshot (attached to a failing test's error) into a few
+// compact, readable lines. Bodies/outputs are truncated so a large response can
+// never blow up the log.
+function truncate(value, max = 2000) {
+  let s = typeof value === 'string' ? value : JSON.stringify(value);
+  if (s === undefined) s = String(value);
+  if (s.length > max) return s.slice(0, max) + ` … (${s.length - max} more chars)`;
+  return s;
+}
+
+function formatObserved(observed) {
+  const lines = [];
+  if (observed.type === 'http') {
+    const req = observed.request || {};
+    lines.push(`→ ${req.method || 'GET'} ${req.url || ''}`);
+    const res = observed.response;
+    if (res) {
+      lines.push(`← status ${res.statusCode}`);
+      if (res.body !== undefined && res.body !== null && res.body !== '') {
+        lines.push(`← body ${truncate(res.body)}`);
+      }
+    } else {
+      lines.push('← no response (request failed before a response was received)');
+    }
+  } else if (observed.type === 'command') {
+    lines.push(`$ ${truncate(observed.command, 300)}`);
+    const res = observed.result;
+    if (res) {
+      lines.push(`exit ${res.exitCode}`);
+      if (res.stdout) lines.push(`stdout ${truncate(res.stdout)}`);
+      if (res.stderr) lines.push(`stderr ${truncate(res.stderr)}`);
+    } else {
+      lines.push('(command did not run to completion)');
+    }
+  }
+  return lines;
+}
+
 function printResults(result) {
   const { total, passed, failed, skipped, results } = result;
 
@@ -135,13 +173,21 @@ function printResults(result) {
           '\n'
       );
     } else {
+      const attemptInfo = r.attempts > 1 ? c.dim(` [${r.attempts} attempts]`) : '';
       process.stdout.write(
-        `  ${c.red('✗')} ${c.bold(r.name)} ${c.dim(formatDuration(r.durationMs))}\n`
+        `  ${c.red('✗')} ${c.bold(r.name)} ${c.dim(formatDuration(r.durationMs))}${attemptInfo}\n`
       );
       if (r.error) {
         const lines = r.error.split('\n');
         for (const line of lines) {
           process.stdout.write(`      ${c.red(line)}\n`);
+        }
+      }
+      // Cleaner debug: surface the actual request/response (or command result)
+      // from the last failing attempt instead of re-running under DEBUG_MODE.
+      if (r.observed) {
+        for (const line of formatObserved(r.observed)) {
+          process.stdout.write(`      ${c.dim(line)}\n`);
         }
       }
     }

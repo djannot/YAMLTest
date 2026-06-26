@@ -58,46 +58,151 @@ function serialiseDefinition(def) {
   return yaml.dump(def);
 }
 
+// ── Runtime defaults (env-overridable) ──────────────────────────────────────
+// These mirror the historical procgen mocha harness: retry up to 120 times with
+// a 1s pause, give each attempt 10s, and cap the whole retry loop at 3m. They can
+// be tuned per run via env vars without changing any test definition.
+function intFromEnv(name, fallback) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
+// Resolved per call (not at module load) so tests and callers can override via
+// env without re-importing. Fallbacks mirror the historical procgen harness.
+const MAXTIME_BUFFER_MS = 60000;
+function defaults() {
+  return {
+    retries: intFromEnv('YAMLTEST_RETRIES', 120),
+    retryIntervalMs: intFromEnv('YAMLTEST_RETRY_INTERVAL_MS', 1000),
+    timeoutMs: intFromEnv('YAMLTEST_TIMEOUT_MS', 10000),
+    maxtimeFloorMs: intFromEnv('YAMLTEST_MAXTIME_MS', 180000),
+  };
+}
+
 /**
- * Run a single test definition with optional retry support.
+ * Parse a duration value into milliseconds.
+ * Accepts a plain number (already ms) or a duration string: "500ms", "30s",
+ * "3m", "1h" (no unit ⇒ ms). Returns null when the value is absent/unparseable.
+ */
+function parseDuration(value) {
+  if (value === undefined || value === null) return null;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value === 'string') {
+    const m = value.trim().match(/^(\d+(?:\.\d+)?)\s*(ms|s|m|h)?$/i);
+    if (!m) return null;
+    const n = parseFloat(m[1]);
+    const unit = (m[2] || 'ms').toLowerCase();
+    const mult = unit === 'h' ? 3600000 : unit === 'm' ? 60000 : unit === 's' ? 1000 : 1;
+    return Math.round(n * mult);
+  }
+  return null;
+}
+
+/**
+ * Race a promise against a timeout. The original promise is allowed to settle
+ * later (its result is ignored) but we attach a no-op handler so a late
+ * rejection never becomes an unhandledRejection.
+ */
+function withTimeout(promise, ms, label) {
+  promise.then(() => {}, () => {}); // swallow late settle
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+    if (timer.unref) timer.unref();
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * One attempt = `consecutive` successful executeTest runs in a row. Any failure
+ * rejects (and carries the innermost error's `observed` snapshot) so the whole
+ * attempt is retried.
+ */
+async function runConsecutive(yamlStr, consecutive) {
+  for (let c = 0; c < consecutive; c++) {
+    await executeTest(yamlStr);
+  }
+}
+
+/**
+ * Run a single test definition with retry, consecutive, per-attempt timeout and
+ * an overall wall-clock budget (maxtime).
+ *
+ * Knobs (all optional, read from the definition):
+ *   retries      - max retry attempts after the first        (default 120)
+ *   consecutive  - successful runs required per attempt       (default 1)
+ *   timeout      - per-attempt cap in ms                      (default 10000)
+ *   maxtime      - wall-clock cap on the whole retry loop;    (default max(180s, timeout+60s))
+ *                  number ⇒ ms, or duration string "3m"/"420s"
  *
  * @param {object} def - Normalised test definition
  * @param {number} index - 0-based index in the test array (for labelling)
- * @returns {Promise<{name: string, passed: boolean, error: string|null, durationMs: number}>}
+ * @returns {Promise<TestResult>}
  */
 async function runSingleTest(def, index) {
-  const retries = typeof def.retries === 'number' ? def.retries : 0;
+  const cfg = defaults();
+  const retries = typeof def.retries === 'number' ? def.retries : cfg.retries;
+  const consecutive = typeof def.consecutive === 'number' && def.consecutive >= 1 ? def.consecutive : 1;
+  const perAttemptTimeout = typeof def.timeout === 'number' ? def.timeout : cfg.timeoutMs;
+  const retryIntervalMs = cfg.retryIntervalMs;
+  const explicitMaxtime = parseDuration(def.maxtime);
+  const maxtimeMs = explicitMaxtime != null
+    ? explicitMaxtime
+    : Math.max(cfg.maxtimeFloorMs, perAttemptTimeout + MAXTIME_BUFFER_MS);
+
   const name = def.name || def.test_title || `test-${index + 1}`;
   const yamlStr = serialiseDefinition(def);
 
   let lastError = null;
+  let timedOut = false;
+  let attemptsMade = 0;
   const start = Date.now();
 
   for (let attempt = 0; attempt <= retries; attempt++) {
+    // Circuit-breaker: stop retrying once the wall-clock budget is spent.
+    if (attempt > 0 && Date.now() - start > maxtimeMs) {
+      timedOut = true;
+      break;
+    }
+    attemptsMade++;
     try {
-      await executeTest(yamlStr);
+      await withTimeout(runConsecutive(yamlStr, consecutive), perAttemptTimeout, 'attempt');
       return {
         name,
         passed: true,
         error: null,
+        observed: null,
         durationMs: Date.now() - start,
-        attempts: attempt + 1,
+        attempts: attemptsMade,
+        timedOut: false,
       };
     } catch (err) {
       lastError = err;
-      if (attempt < retries) {
-        // Brief pause between retries so transient failures can recover
-        await new Promise((r) => setTimeout(r, 500));
+      if (attempt < retries && Date.now() - start <= maxtimeMs) {
+        await new Promise((r) => setTimeout(r, retryIntervalMs));
       }
     }
+  }
+
+  let error;
+  if (lastError) {
+    error = lastError.message;
+  } else if (timedOut) {
+    error = `Exceeded maxtime budget (${maxtimeMs}ms) after ${attemptsMade} attempt(s)`;
+  } else {
+    error = 'Unknown error';
   }
 
   return {
     name,
     passed: false,
-    error: lastError ? lastError.message : 'Unknown error',
+    error,
+    observed: lastError && lastError.observed ? lastError.observed : null,
     durationMs: Date.now() - start,
-    attempts: retries + 1,
+    attempts: attemptsMade,
+    timedOut,
   };
 }
 
@@ -160,4 +265,4 @@ async function runTests(yamlString) {
   return { total, passed, failed, skipped, results };
 }
 
-module.exports = { runTests, parseTestDefinitions, runSingleTest };
+module.exports = { runTests, parseTestDefinitions, runSingleTest, parseDuration };
