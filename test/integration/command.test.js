@@ -50,6 +50,23 @@ describe('Command integration – exit codes', () => {
       )
     ).resolves.toBe(true);
   });
+
+  it('does not kill itself when the command pkills a pattern contained in its own text', async () => {
+    // Regression: when commands ran as `sh -c "<script>"`, the shell's argv WAS the
+    // script text, so a `pkill -f "<pattern-in-the-script>"` matched and killed the
+    // test shell itself (exit code null). Running the command from a temp file keeps
+    // the script body off the shell's command line, so this must now survive.
+    const marker = `yamltest_selfmatch_marker_${process.pid}`;
+    await expect(
+      executeTest(
+        yaml({
+          command: { command: `echo "${marker}"; pkill -f "${marker}" 2>/dev/null || true; echo survived; exit 0` },
+          source: { type: 'local' },
+          expect: { exitCode: 0, stdout: { contains: 'survived' } },
+        })
+      )
+    ).resolves.toBe(true);
+  });
 });
 
 describe('Command integration – stdout validation', () => {

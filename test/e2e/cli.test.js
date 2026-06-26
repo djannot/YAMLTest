@@ -228,6 +228,25 @@ describe('CLI e2e – failing tests', () => {
     expect(r.stdout).toContain('1 skipped');
   });
 
+  it('shows the attempt count when a test passes only after retrying', () => {
+    // A command that fails on its first run and passes on the second, driven by
+    // a counter file, so the runner needs exactly one retry to go green.
+    const counter = path.join(os.tmpdir(), `yt-cli-retry-${process.pid}-${Date.now()}`);
+    try { fs.unlinkSync(counter); } catch (_) {}
+    const yaml = JSON.stringify({
+      name: 'passes-after-one-retry',
+      command: { command: `c=$(cat ${counter} 2>/dev/null || echo 0); c=$((c+1)); echo $c > ${counter}; [ $c -ge 2 ]` },
+      source: { type: 'local' },
+      expect: { exitCode: 0 },
+      retries: 3,
+    });
+    const r = runCli(yaml, ['-f', '-'], { YAMLTEST_RETRY_INTERVAL_MS: '0' });
+    try { fs.unlinkSync(counter); } catch (_) {}
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('1 passed');
+    expect(r.stdout).toContain('[2 attempts]'); // passed on the 2nd attempt
+  });
+
   it('exits 1 on empty stdin', () => {
     const r = runCli('');
     expect(r.status).toBe(1);

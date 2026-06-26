@@ -16,6 +16,13 @@ function debugLog(...args) {
   }
 }
 
+// Monotonic counter for unique temp script filenames within a single process.
+let __localCommandSeq = 0;
+function nextLocalCommandId() {
+  __localCommandSeq += 1;
+  return __localCommandSeq;
+}
+
 /**
  * Attach an "observed" snapshot (the actual request/response or command result)
  * to an Error so callers can surface *why* a test failed without re-running it
@@ -1922,15 +1929,32 @@ async function executeCommandTest(test) {
  */
 async function executeLocalCommand(commandConfig) {
   const { spawn } = require('child_process');
+  const os = require('os');
+  const path = require('path');
 
   const env = { ...process.env, ...(commandConfig.env || {}) };
   const cwd = commandConfig.workingDir || process.cwd();
+  const isWin = process.platform === 'win32';
 
-  // Execute command through shell to support pipes and other shell features
-  const cmd = process.platform === 'win32' ? 'cmd' : 'sh';
-  const args = process.platform === 'win32' ? ['/c', commandConfig.command] : ['-c', commandConfig.command];
+  // Run the command from a temp *script file* (`sh <file>`), rather than passing
+  // the whole script inline as `sh -c "<script>"`. This keeps the script body OUT
+  // of the shell process's command line. Otherwise a pattern-based process tool the
+  // script itself runs — e.g. `pkill -f "some-server"` for cleanup — can match the
+  // shell that is running the test (because its argv literally contains that text)
+  // and kill it, making the command exit with a null code. Running from a file also
+  // sidesteps ARG_MAX limits and argv quoting pitfalls for large commands.
+  const ext = isWin ? 'cmd' : 'sh';
+  const scriptPath = path.join(os.tmpdir(), `yamltest-cmd-${process.pid}-${Date.now()}-${nextLocalCommandId()}.${ext}`);
+  fs.writeFileSync(scriptPath, commandConfig.command, { encoding: 'utf8' });
 
-  debugLog(`Executing shell command: ${commandConfig.command}`);
+  const cleanup = () => {
+    try { fs.unlinkSync(scriptPath); } catch (_) { /* already gone */ }
+  };
+
+  const cmd = isWin ? 'cmd' : 'sh';
+  const args = isWin ? ['/c', scriptPath] : [scriptPath];
+
+  debugLog(`Executing shell command (via ${scriptPath}): ${commandConfig.command}`);
 
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, {
@@ -1951,6 +1975,7 @@ async function executeLocalCommand(commandConfig) {
     });
 
     child.on('close', (exitCode) => {
+      cleanup();
       debugLog(`Command completed with exit code: ${exitCode}`);
       debugLog(`stdout: ${stdout}`);
       debugLog(`stderr: ${stderr}`);
@@ -1978,6 +2003,7 @@ async function executeLocalCommand(commandConfig) {
     });
 
     child.on('error', (error) => {
+      cleanup();
       debugLog(`Command execution error: ${error.message}`);
       reject(new Error(`Failed to execute command: ${error.message}`));
     });
