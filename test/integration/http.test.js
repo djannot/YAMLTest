@@ -252,6 +252,29 @@ describe('HTTP integration – POST with body', () => {
       )
     ).resolves.toBe(true);
   });
+
+  it('substitutes environment variables in the request body', async () => {
+    process.env.YAMLTEST_BODY_VAR = 'subbed-value';
+    try {
+      await expect(
+        executeTest(
+          yaml({
+            http: {
+              url: baseUrl,
+              method: 'POST',
+              path: '/echo',
+              headers: { 'Content-Type': 'application/json' },
+              body: '{"msg":"${YAMLTEST_BODY_VAR}"}',
+            },
+            source: { type: 'local' },
+            expect: { statusCode: 200, bodyContains: 'subbed-value' },
+          })
+        )
+      ).resolves.toBe(true);
+    } finally {
+      delete process.env.YAMLTEST_BODY_VAR;
+    }
+  });
 });
 
 describe('HTTP integration – url with embedded path', () => {

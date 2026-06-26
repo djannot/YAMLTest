@@ -184,11 +184,14 @@ Test any HTTP endpoint locally or from within a Kubernetes pod.
 
 #### Environment variable substitution
 
-Any `$VAR` or `${VAR}` in the `url` field is resolved from the environment:
+Any `$VAR` or `${VAR}` in the `url`, `headers`, or `body` fields is resolved from the environment:
 
 ```yaml
 http:
   url: "${API_BASE_URL}"
+  headers:
+    Authorization: "Bearer ${API_TOKEN}"
+  body: '{"id": "${REQUEST_ID}"}'
 ```
 
 #### Pod-based HTTP test
@@ -427,13 +430,14 @@ Tests run **sequentially** and stop at the first failure (fail-fast).
   expect: { exitCode: 0, stdout: { contains: "Running" } }
 ```
 
-### Environment variables in URL
+### Environment variables in url, headers, and body
 
 ```yaml
 http:
   url: "$API_BASE_URL"          # $VAR or ${VAR}
   headers:
     Authorization: "Bearer ${API_TOKEN}"
+  body: '{"id": "${REQUEST_ID}"}'
 ```
 
 ### setVars — variable passing between steps

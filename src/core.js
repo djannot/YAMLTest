@@ -631,6 +631,11 @@ async function executeHttpTest(test) {
     }
   }
 
+  // Resolve environment variables in the request body
+  if (typeof test.http.body === 'string') {
+    test.http.body = resolveEnvVarsInString(test.http.body);
+  }
+
   // Create a descriptive test name
   let testName = `${test.http.method} ${test.http.url}${test.http.path}`;
   if (test.source.type === 'pod' && test.source.selector) {
@@ -2357,6 +2362,18 @@ async function executeHttpRequestInternal(requestConfig) {
 
   // Resolve environment variables in URL
   requestConfig.http.url = resolveEnvVarsInUrl(requestConfig.http.url);
+
+  // Resolve environment variables in headers and body
+  if (requestConfig.http.headers && typeof requestConfig.http.headers === 'object') {
+    for (const [key, value] of Object.entries(requestConfig.http.headers)) {
+      if (typeof value === 'string') {
+        requestConfig.http.headers[key] = resolveEnvVarsInString(value);
+      }
+    }
+  }
+  if (typeof requestConfig.http.body === 'string') {
+    requestConfig.http.body = resolveEnvVarsInString(requestConfig.http.body);
+  }
 
   let response;
 
