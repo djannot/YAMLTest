@@ -656,6 +656,16 @@ async function executeHttpTest(test) {
     test.http.body = resolveEnvVarsInString(test.http.body);
   }
 
+  // Resolve environment variables in query params (keys and string values)
+  if (test.http.params && typeof test.http.params === 'object') {
+    const resolvedParams = {};
+    for (const [key, value] of Object.entries(test.http.params)) {
+      const resolvedKey = resolveEnvVarsInString(key);
+      resolvedParams[resolvedKey] = typeof value === 'string' ? resolveEnvVarsInString(value) : value;
+    }
+    test.http.params = resolvedParams;
+  }
+
   // Create a descriptive test name
   let testName = `${test.http.method} ${test.http.url}${test.http.path}`;
   if (test.source.type === 'pod' && test.source.selector) {

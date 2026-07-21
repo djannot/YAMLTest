@@ -67,6 +67,13 @@ beforeAll(async () => {
         return;
       }
 
+      if (url.startsWith('/query-echo')) {
+        const query = require('url').parse(req.url, true).query;
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(query));
+        return;
+      }
+
       res.writeHead(404);
       res.end('Not Found');
     });
@@ -185,6 +192,36 @@ describe('HTTP integration – JSON body validation', () => {
         })
       )
     ).resolves.toBe(true);
+  });
+});
+
+describe('HTTP integration – query params', () => {
+  it('sends query params and substitutes env vars in their values', async () => {
+    process.env.YT_TEST_KEY = 'secret-key-123';
+    try {
+      await expect(
+        executeTest(
+          yaml({
+            http: {
+              url: baseUrl,
+              method: 'GET',
+              path: '/query-echo',
+              params: { apiKey: '${YT_TEST_KEY}', product: 'p1' },
+            },
+            source: { type: 'local' },
+            expect: {
+              statusCode: 200,
+              bodyJsonPath: [
+                { path: '$.apiKey', comparator: 'equals', value: 'secret-key-123' },
+                { path: '$.product', comparator: 'equals', value: 'p1' },
+              ],
+            },
+          })
+        )
+      ).resolves.toBe(true);
+    } finally {
+      delete process.env.YT_TEST_KEY;
+    }
   });
 });
 
