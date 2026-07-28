@@ -622,6 +622,10 @@ async function executeHttpTest(test) {
   }
 
   test.http.url = resolveEnvVarsInUrl(test.http.url);// Resolve environment variables in URL
+  // Resolve environment variables in the path (consistent with url/headers/body/params)
+  if (typeof test.http.path === 'string') {
+    test.http.path = resolveEnvVarsInString(test.http.path);
+  }
   test.http.method = test.http.method || 'GET';
 
   // If the url contains a path component (beyond '/'), extract it and prepend it to the explicit
@@ -2428,8 +2432,11 @@ async function executeHttpRequestInternal(requestConfig) {
     throw new Error('HTTP configuration missing in request config');
   }
 
-  // Resolve environment variables in URL
+  // Resolve environment variables in URL and path
   requestConfig.http.url = resolveEnvVarsInUrl(requestConfig.http.url);
+  if (typeof requestConfig.http.path === 'string') {
+    requestConfig.http.path = resolveEnvVarsInString(requestConfig.http.path);
+  }
 
   // Resolve environment variables in headers and body
   if (requestConfig.http.headers && typeof requestConfig.http.headers === 'object') {
