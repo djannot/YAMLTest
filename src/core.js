@@ -1982,7 +1982,7 @@ async function executeLocalCommand(commandConfig) {
   // into the strings below (assertions and the `observed` failure snapshot depend
   // on that, always), AND simultaneously echoed to our own stdout/stderr as it
   // arrives so long-running tests show progress live instead of going silent
-  // until they finish. Enable in per-test with `command.stream: true` or globally with
+  // until they finish. Enable per-test with `command.stream: true` or globally with
   // YAMLTEST_STREAM=true.
   const stream = process.env.YAMLTEST_STREAM === 'true' || commandConfig.stream === true;
 

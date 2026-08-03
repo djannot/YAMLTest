@@ -212,12 +212,12 @@ describe('Command integration – shell pipes & complex commands', () => {
 });
 
 describe('Command integration – output streaming', () => {
-  // Capture everything written to process.stdout during the run so we can assert
-  // whether the command's own output was teed through live. mockImplementation
-  // keeps the marker out of the real test output.
-  function captureStdout() {
+  // Capture everything written to the given std stream during the run so we can
+  // assert whether the command's own output was teed through live.
+  // mockImplementation keeps the marker out of the real test output.
+  function captureStream(streamName = 'stdout') {
     const chunks = [];
-    const spy = vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
+    const spy = vi.spyOn(process[streamName], 'write').mockImplementation((chunk) => {
       chunks.push(chunk.toString());
       return true;
     });
@@ -229,7 +229,7 @@ describe('Command integration – output streaming', () => {
 
   it('tees command stdout to process.stdout when stream: true', async () => {
     const marker = `yamltest_stream_marker_${process.pid}`;
-    const cap = captureStdout();
+    const cap = captureStream('stdout');
     try {
       await expect(
         executeTest(
@@ -246,9 +246,53 @@ describe('Command integration – output streaming', () => {
     expect(cap.sawMarker(marker)).toBe(true);
   });
 
+  it('tees command stdout to process.stdout when YAMLTEST_STREAM=true', async () => {
+    const marker = `yamltest_envstream_marker_${process.pid}`;
+    const prev = process.env.YAMLTEST_STREAM;
+    process.env.YAMLTEST_STREAM = 'true';
+    const cap = captureStream('stdout');
+    try {
+      await expect(
+        executeTest(
+          yaml({
+            // No per-test stream flag — the env var alone must enable streaming.
+            command: { command: `echo "${marker}"` },
+            source: { type: 'local' },
+            expect: { exitCode: 0, stdout: { contains: marker } },
+          })
+        )
+      ).resolves.toBe(true);
+    } finally {
+      cap.restore();
+      if (prev === undefined) delete process.env.YAMLTEST_STREAM;
+      else process.env.YAMLTEST_STREAM = prev;
+    }
+    expect(cap.sawMarker(marker)).toBe(true);
+  });
+
+  it('tees command stderr to process.stderr when stream: true', async () => {
+    const marker = `yamltest_stderr_marker_${process.pid}`;
+    const cap = captureStream('stderr');
+    try {
+      await expect(
+        executeTest(
+          yaml({
+            // Writes only to stderr and exits 0.
+            command: { command: `echo "${marker}" >&2`, stream: true },
+            source: { type: 'local' },
+            expect: { exitCode: 0, stderr: { contains: marker } },
+          })
+        )
+      ).resolves.toBe(true);
+    } finally {
+      cap.restore();
+    }
+    expect(cap.sawMarker(marker)).toBe(true);
+  });
+
   it('does not tee command output when stream is not set', async () => {
     const marker = `yamltest_nostream_marker_${process.pid}`;
-    const cap = captureStdout();
+    const cap = captureStream('stdout');
     try {
       await expect(
         executeTest(
