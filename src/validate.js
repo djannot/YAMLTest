@@ -289,6 +289,7 @@ const commandConfigSchema = {
   properties: {
     command: { type: 'string' },
     parseJson: { type: 'boolean' },
+    stream: { type: 'boolean' },
     env: {
       type: 'object',
       additionalProperties: { type: 'string' },

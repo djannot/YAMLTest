@@ -7,7 +7,7 @@
  * executeTest → executeCommandTest → executeLocalCommand → child_process.spawn
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { executeTest } from '../../src/index.js';
 
 function yaml(obj) {
@@ -208,5 +208,62 @@ describe('Command integration – shell pipes & complex commands', () => {
         })
       )
     ).resolves.toBe(true);
+  });
+});
+
+describe('Command integration – output streaming', () => {
+  // Capture everything written to process.stdout during the run so we can assert
+  // whether the command's own output was teed through live. mockImplementation
+  // keeps the marker out of the real test output.
+  function captureStdout() {
+    const chunks = [];
+    const spy = vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
+      chunks.push(chunk.toString());
+      return true;
+    });
+    return {
+      restore: () => spy.mockRestore(),
+      sawMarker: (m) => chunks.some((c) => c.includes(m)),
+    };
+  }
+
+  it('tees command stdout to process.stdout when stream: true', async () => {
+    const marker = `yamltest_stream_marker_${process.pid}`;
+    const cap = captureStdout();
+    try {
+      await expect(
+        executeTest(
+          yaml({
+            command: { command: `echo "${marker}"`, stream: true },
+            source: { type: 'local' },
+            expect: { exitCode: 0, stdout: { contains: marker } },
+          })
+        )
+      ).resolves.toBe(true);
+    } finally {
+      cap.restore();
+    }
+    expect(cap.sawMarker(marker)).toBe(true);
+  });
+
+  it('does not tee command output when stream is not set', async () => {
+    const marker = `yamltest_nostream_marker_${process.pid}`;
+    const cap = captureStdout();
+    try {
+      await expect(
+        executeTest(
+          yaml({
+            command: { command: `echo "${marker}"` },
+            source: { type: 'local' },
+            expect: { exitCode: 0, stdout: { contains: marker } },
+          })
+        )
+      ).resolves.toBe(true);
+    } finally {
+      cap.restore();
+    }
+    // The command still runs and its output is captured for the assertion above,
+    // but nothing is echoed live.
+    expect(cap.sawMarker(marker)).toBe(false);
   });
 });
