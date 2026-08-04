@@ -211,7 +211,7 @@ describe('Command integration – shell pipes & complex commands', () => {
   });
 });
 
-describe('Command integration – output streaming', () => {
+describe('Command integration – echo output', () => {
   // Capture everything written to the given std stream during the run so we can
   // assert whether the command's own output was teed through live.
   // mockImplementation keeps the marker out of the real test output.
@@ -227,14 +227,14 @@ describe('Command integration – output streaming', () => {
     };
   }
 
-  it('tees command stdout to process.stdout when stream: true', async () => {
-    const marker = `yamltest_stream_marker_${process.pid}`;
+  it('tees command stdout to process.stdout when echo: true', async () => {
+    const marker = `yamltest_echo_marker_${process.pid}`;
     const cap = captureStream('stdout');
     try {
       await expect(
         executeTest(
           yaml({
-            command: { command: `echo "${marker}"`, stream: true },
+            command: { command: `echo "${marker}"`, echo: true },
             source: { type: 'local' },
             expect: { exitCode: 0, stdout: { contains: marker } },
           })
@@ -246,16 +246,16 @@ describe('Command integration – output streaming', () => {
     expect(cap.sawMarker(marker)).toBe(true);
   });
 
-  it('tees command stdout to process.stdout when YAMLTEST_STREAM=true', async () => {
-    const marker = `yamltest_envstream_marker_${process.pid}`;
-    const prev = process.env.YAMLTEST_STREAM;
-    process.env.YAMLTEST_STREAM = 'true';
+  it('tees command stdout to process.stdout when YAMLTEST_ECHO=true', async () => {
+    const marker = `yamltest_envecho_marker_${process.pid}`;
+    const prev = process.env.YAMLTEST_ECHO;
+    process.env.YAMLTEST_ECHO = 'true';
     const cap = captureStream('stdout');
     try {
       await expect(
         executeTest(
           yaml({
-            // No per-test stream flag — the env var alone must enable streaming.
+            // No per-test echo flag — the env var alone must enable echo.
             command: { command: `echo "${marker}"` },
             source: { type: 'local' },
             expect: { exitCode: 0, stdout: { contains: marker } },
@@ -264,13 +264,13 @@ describe('Command integration – output streaming', () => {
       ).resolves.toBe(true);
     } finally {
       cap.restore();
-      if (prev === undefined) delete process.env.YAMLTEST_STREAM;
-      else process.env.YAMLTEST_STREAM = prev;
+      if (prev === undefined) delete process.env.YAMLTEST_ECHO;
+      else process.env.YAMLTEST_ECHO = prev;
     }
     expect(cap.sawMarker(marker)).toBe(true);
   });
 
-  it('tees command stderr to process.stderr when stream: true', async () => {
+  it('tees command stderr to process.stderr when echo: true', async () => {
     const marker = `yamltest_stderr_marker_${process.pid}`;
     const cap = captureStream('stderr');
     try {
@@ -278,7 +278,7 @@ describe('Command integration – output streaming', () => {
         executeTest(
           yaml({
             // Writes only to stderr and exits 0.
-            command: { command: `echo "${marker}" >&2`, stream: true },
+            command: { command: `echo "${marker}" >&2`, echo: true },
             source: { type: 'local' },
             expect: { exitCode: 0, stderr: { contains: marker } },
           })
@@ -290,8 +290,8 @@ describe('Command integration – output streaming', () => {
     expect(cap.sawMarker(marker)).toBe(true);
   });
 
-  it('does not tee command output when stream is not set', async () => {
-    const marker = `yamltest_nostream_marker_${process.pid}`;
+  it('does not tee command output when echo is not set', async () => {
+    const marker = `yamltest_noecho_marker_${process.pid}`;
     const cap = captureStream('stdout');
     try {
       await expect(

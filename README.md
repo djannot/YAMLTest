@@ -79,7 +79,7 @@ OPTIONS
 
 ENVIRONMENT
   DEBUG_MODE=true       Enable verbose debug logging
-  YAMLTEST_STREAM=true  Echo every local command's output live as it runs
+  YAMLTEST_ECHO=true    Echo every local command's output live as it runs
   NO_COLOR=1            Disable ANSI colour output
 ```
 
@@ -258,7 +258,7 @@ Run any shell command and validate its output.
   command:
     command: "kubectl version -short"
     parseJson: false              # parse stdout as JSON (default: false)
-    stream: true                  # echo the command's output live (default: false)
+    echo: true                    # echo the command's output live (default: false)
     env:
       MY_VAR: value               # extra environment variables
     workingDir: /tmp              # working directory
@@ -272,27 +272,27 @@ Run any shell command and validate its output.
       contains: ""
 ```
 
-#### Streaming output for long-running commands
+#### Echoing output for long-running commands
 
 By default a command's stdout/stderr is captured silently and only shown at the
 end (and only for failing tests). For a long-running command — a browser flow, a
 multi-minute integration script — that means a blank screen until it finishes. Set
-`stream: true` to tee the command's output to your terminal **as it is produced**,
+`echo: true` to tee the command's output to your terminal **as it is produced**,
 while still capturing it for the assertions:
 
 ```yaml
 - name: long oauth flow
   command:
     command: "./run-oauth-flow.sh"
-    stream: true
+    echo: true
   source:
     type: local
   expect:
     exitCode: 0
 ```
 
-Set it globally instead of per-test with the `YAMLTEST_STREAM=true` environment
-variable. Streaming applies to `source.type: local` commands. Because the live
+Set it globally instead of per-test with the `YAMLTEST_ECHO=true` environment
+variable. Echoing applies to `source.type: local` commands. Because the live
 output interleaves with the `✓`/`✗` summary, it is off by default.
 
 Multiple stdout expectations (all must pass):

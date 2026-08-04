@@ -1899,13 +1899,13 @@ async function executeCommandTest(test) {
         throw new Error('Kubernetes selector is required for pod-based command tests');
       }
 
-      // Live streaming is only implemented for the local executor. On the pod path
+      // Live echo is only implemented for the local executor. On the pod path
       // the command runs via `kubectl exec` and its output is buffered until the
-      // command completes, so warn rather than silently ignoring a stream request.
-      if (process.env.YAMLTEST_STREAM === 'true' || commandConfig.stream === true) {
+      // command completes, so warn rather than silently ignoring an echo request.
+      if (process.env.YAMLTEST_ECHO === 'true' || commandConfig.echo === true) {
         const label = test.name || test.test_title;
         console.warn(
-          `Warning: stream is not supported for pod command tests (source.type: pod)` +
+          `Warning: echo is not supported for pod command tests (source.type: pod)` +
           `${label ? ` in "${label}"` : ''}; output will only be shown after the command completes.`
         );
       }
@@ -1935,7 +1935,7 @@ async function executeCommandTest(test) {
     attachObserved(error, {
       type: 'command',
       command: commandConfig.command,
-      streamed: result ? result.streamed === true : false,
+      echoed: result ? result.echoed === true : false,
       result: result
         ? { exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr }
         : null,
@@ -1982,9 +1982,9 @@ async function executeLocalCommand(commandConfig) {
   // into the strings below (assertions and the `observed` failure snapshot depend
   // on that, always), AND simultaneously echoed to our own stdout/stderr as it
   // arrives so long-running tests show progress live instead of going silent
-  // until they finish. Enable per-test with `command.stream: true` or globally with
-  // YAMLTEST_STREAM=true.
-  const stream = process.env.YAMLTEST_STREAM === 'true' || commandConfig.stream === true;
+  // until they finish. Enable per-test with `command.echo: true` or globally with
+  // YAMLTEST_ECHO=true.
+  const echo = process.env.YAMLTEST_ECHO === 'true' || commandConfig.echo === true;
 
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, {
@@ -1998,12 +1998,12 @@ async function executeLocalCommand(commandConfig) {
 
     child.stdout.on('data', (data) => {
       stdout += data.toString();
-      if (stream) process.stdout.write(data);
+      if (echo) process.stdout.write(data);
     });
 
     child.stderr.on('data', (data) => {
       stderr += data.toString();
-      if (stream) process.stderr.write(data);
+      if (echo) process.stderr.write(data);
     });
 
     child.on('close', (exitCode) => {
@@ -2017,7 +2017,7 @@ async function executeLocalCommand(commandConfig) {
         stderr: stderr.trim(),
         exitCode,
         output: stdout.trim(), // alias for backwards compatibility
-        streamed: stream       // let callers avoid re-printing output shown live
+        echoed: echo           // let callers avoid re-printing output shown live
       };
 
       // Parse JSON if requested and stdout is not empty
