@@ -228,6 +228,25 @@ const httpConfigSchema = {
 
 // ── HTTP expect ──────────────────────────────────────────────────────
 
+// connectionError asserts the request fails at the transport level (DNS, TCP,
+// or TLS) before any HTTP response is received. `true` accepts any connection
+// failure; the object form additionally constrains the error's code/message.
+const connectionErrorSchema = {
+  oneOf: [
+    { type: 'boolean' },
+    {
+      type: 'object',
+      properties: {
+        code: { type: 'string' },      // e.g. "ECONNREFUSED", "CERT_HAS_EXPIRED"
+        contains: { type: 'string' },  // substring of the error message
+        matches: { type: 'string' },   // regex against the error message
+      },
+      minProperties: 1,
+      additionalProperties: false,
+    },
+  ],
+};
+
 const httpExpectSchema = {
   type: 'object',
   properties: {
@@ -250,8 +269,26 @@ const httpExpectSchema = {
       items: headerExpectationItem,
       minItems: 1,
     },
+    connectionError: connectionErrorSchema,
   },
   additionalProperties: false,
+  // A failed connection yields no response, so connectionError cannot be
+  // combined with any response-based expectation.
+  if: { required: ['connectionError'] },
+  then: {
+    not: {
+      anyOf: [
+        { required: ['statusCode'] },
+        { required: ['body'] },
+        { required: ['bodyContains'] },
+        { required: ['bodyRegex'] },
+        { required: ['bodyJsonPath'] },
+        { required: ['headers'] },
+      ],
+    },
+    errorMessage:
+      'expect.connectionError cannot be combined with response-based expectations (statusCode, body, bodyContains, bodyRegex, bodyJsonPath, headers)',
+  },
 };
 
 // ── HTTP setVars ─────────────────────────────────────────────────────
