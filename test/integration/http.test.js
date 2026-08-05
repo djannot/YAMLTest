@@ -465,4 +465,22 @@ describe('HTTP integration – connectionError', () => {
       )
     ).rejects.toThrow(/Expected the connection to fail/);
   });
+
+  it('fails loudly on a config error (unreadable cert), not treated as a connection error', async () => {
+    // A missing cert file is a plain Error, not a transport failure — connectionError:true
+    // must NOT swallow it into a pass.
+    await expect(
+      executeTest(
+        yaml({
+          http: {
+            url: 'https://127.0.0.1:1',
+            method: 'GET',
+            cert: '/nonexistent/does-not-exist.pem',
+          },
+          source: { type: 'local' },
+          expect: { connectionError: true },
+        })
+      )
+    ).rejects.toThrow(/Failed to read certificate file/);
+  });
 });

@@ -258,6 +258,10 @@ describe('validateTestDefinitions – expect.connectionError', () => {
     expectValid(connErr(true));
   });
 
+  it('rejects connectionError: false (omit it instead of disabling inline)', () => {
+    expectInvalid(connErr(false));
+  });
+
   it('accepts connectionError with a code constraint', () => {
     expectValid(connErr({ code: 'ECONNREFUSED' }));
   });

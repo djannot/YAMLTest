@@ -233,7 +233,7 @@ const httpConfigSchema = {
 // failure; the object form additionally constrains the error's code/message.
 const connectionErrorSchema = {
   oneOf: [
-    { type: 'boolean' },
+    { const: true },   // `false` is rejected — omit connectionError instead of disabling it inline
     {
       type: 'object',
       properties: {
@@ -245,6 +245,7 @@ const connectionErrorSchema = {
       additionalProperties: false,
     },
   ],
+  errorMessage: 'connectionError must be `true`, or an object with at least one of: code, contains, matches',
 };
 
 const httpExpectSchema = {
