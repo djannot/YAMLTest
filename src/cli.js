@@ -155,12 +155,8 @@ function formatObserved(observed) {
     const res = observed.result;
     if (res) {
       lines.push(`exit ${res.exitCode}`);
-      if (observed.echoed) {
-        lines.push('(stdout/stderr echoed above)');
-      } else {
-        if (res.stdout) lines.push(`stdout ${truncate(res.stdout)}`);
-        if (res.stderr) lines.push(`stderr ${truncate(res.stderr)}`);
-      }
+      if (res.stdout) lines.push(`stdout ${truncate(res.stdout)}`);
+      if (res.stderr) lines.push(`stderr ${truncate(res.stderr)}`);
     } else {
       lines.push('(command did not run to completion)');
     }

@@ -1935,7 +1935,6 @@ async function executeCommandTest(test) {
     attachObserved(error, {
       type: 'command',
       command: commandConfig.command,
-      echoed: result ? result.echoed === true : false,
       result: result
         ? { exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr }
         : null,
@@ -2017,7 +2016,6 @@ async function executeLocalCommand(commandConfig) {
         stderr: stderr.trim(),
         exitCode,
         output: stdout.trim(), // alias for backwards compatibility
-        echoed: echo           // let callers avoid re-printing output shown live
       };
 
       // Parse JSON if requested and stdout is not empty
