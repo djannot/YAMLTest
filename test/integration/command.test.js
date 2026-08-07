@@ -311,3 +311,75 @@ describe('Command integration – echo output', () => {
     expect(cap.sawMarker(marker)).toBe(false);
   });
 });
+
+describe('Command integration – echo warning on pod tests', () => {
+  // A label-selector pod test whose kubectl lookup fails fast (no reachable
+  // cluster), so executeTest rejects *after* the echo warning branch has run.
+  // Pointing KUBECONFIG at a nonexistent file makes kubectl error immediately
+  // instead of hanging, which lets these tests short-circuit before kubectl exec.
+  function podTest(commandConfig) {
+    return yaml({
+      command: commandConfig,
+      source: {
+        type: 'pod',
+        selector: {
+          kind: 'Pod',
+          metadata: { namespace: 'default', labels: { app: 'demo' } },
+        },
+      },
+      expect: { exitCode: 0 },
+    });
+  }
+
+  const POD_WARNING = 'echo is not supported for pod command tests';
+
+  function withNoCluster(fn) {
+    return async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      // Point kubectl at a bogus kubeconfig so the pod lookup fails fast, and
+      // clear any inherited echo flag. vi.stubEnv snapshots the originals;
+      // vi.unstubAllEnvs restores them, so there's no manual save/restore.
+      vi.stubEnv('KUBECONFIG', '/nonexistent-yamltest-kubeconfig');
+      vi.stubEnv('YAMLTEST_ECHO', '');
+      try {
+        await fn(warnSpy);
+      } finally {
+        warnSpy.mockRestore();
+        vi.unstubAllEnvs();
+      }
+    };
+  }
+
+  function podWarnings(warnSpy) {
+    return warnSpy.mock.calls.filter((c) => String(c[0]).includes(POD_WARNING));
+  }
+
+  it(
+    'warns when a pod command test explicitly sets echo: true',
+    withNoCluster(async (warnSpy) => {
+      // The kubectl lookup fails (no cluster), so the test rejects — but the
+      // echo warning fires before kubectl runs, which is what we assert.
+      await expect(executeTest(podTest({ command: 'echo hi', echo: true }))).rejects.toThrow();
+      expect(podWarnings(warnSpy)).toHaveLength(1);
+    })
+  );
+
+  it(
+    'does not warn on a pod command test when only YAMLTEST_ECHO is set',
+    withNoCluster(async (warnSpy) => {
+      vi.stubEnv('YAMLTEST_ECHO', 'true');
+      // No per-test echo flag: the global env var is a blanket "echo where
+      // supported" toggle and must stay silent on the pod path.
+      await expect(executeTest(podTest({ command: 'echo hi' }))).rejects.toThrow();
+      expect(podWarnings(warnSpy)).toHaveLength(0);
+    })
+  );
+
+  it(
+    'does not warn on a pod command test when echo is unset',
+    withNoCluster(async (warnSpy) => {
+      await expect(executeTest(podTest({ command: 'echo hi' }))).rejects.toThrow();
+      expect(podWarnings(warnSpy)).toHaveLength(0);
+    })
+  );
+});

@@ -1901,8 +1901,11 @@ async function executeCommandTest(test) {
 
       // Live echo is only implemented for the local executor. On the pod path
       // the command runs via `kubectl exec` and its output is buffered until the
-      // command completes, so warn rather than silently ignoring an echo request.
-      if (process.env.YAMLTEST_ECHO === 'true' || commandConfig.echo === true) {
+      // command completes.
+      //
+      // NOTE: In order to minimize noise, the YAMLTEST_ECHO will not have any effect here.
+      // Warning will happen only when a pod test *explicitly* opts in with `echo: true`.
+      if (commandConfig.echo === true) {
         const label = test.name || test.test_title;
         console.warn(
           `Warning: echo is not supported for pod command tests (source.type: pod)` +
