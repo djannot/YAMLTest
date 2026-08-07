@@ -72,14 +72,24 @@ const bodyContainsSchema = {
   ],
 };
 
+// A string that must compile as a JavaScript regular expression. The custom
+// `validRegex` keyword (registered below) rejects un-compilable patterns at
+// validation time; otherwise an invalid pattern only throws SyntaxError at match
+// time, inside the retry loop, and gets retried for minutes before reporting.
+const regexString = {
+  type: 'string',
+  validRegex: true,
+  errorMessage: { validRegex: 'must be a valid regular expression' },
+};
+
 const bodyRegexItem = {
   oneOf: [
-    { type: 'string' },
+    regexString,
     {
       type: 'object',
       required: ['value'],
       properties: {
-        value: { type: 'string' },
+        value: regexString,
         negate: { type: 'boolean' },
         caseInsensitive: { type: 'boolean' },
       },
@@ -90,12 +100,12 @@ const bodyRegexItem = {
 
 const bodyRegexSchema = {
   oneOf: [
-    { type: 'string' },
+    regexString,
     {
       type: 'object',
       required: ['value'],
       properties: {
-        value: { type: 'string' },
+        value: regexString,
         negate: { type: 'boolean' },
         caseInsensitive: { type: 'boolean' },
       },
@@ -239,7 +249,7 @@ const connectionErrorSchema = {
       properties: {
         code: { type: 'string' },      // e.g. "ECONNREFUSED", "CERT_HAS_EXPIRED"
         contains: { type: 'string' },  // substring of the error message
-        matches: { type: 'string' },   // regex against the error message
+        matches: regexString,          // regex against the error message
       },
       minProperties: 1,
       additionalProperties: false,
@@ -305,7 +315,7 @@ const httpSetVarRule = {
       type: 'object',
       required: ['pattern'],
       properties: {
-        pattern: { type: 'string' },
+        pattern: regexString,
         group: { type: 'number' },
       },
       additionalProperties: false,
@@ -368,7 +378,7 @@ const commandSetVarRule = {
       type: 'object',
       required: ['pattern'],
       properties: {
-        pattern: { type: 'string' },
+        pattern: regexString,
         group: { type: 'number' },
         source: { type: 'string', enum: ['stdout', 'stderr'] },
       },
@@ -576,7 +586,7 @@ const testDefinitionSchema = {
     {
       if: {
         required: ['setVars', 'expect'],
-        properties: { expect: { required: ['connectionError'] } },
+        properties: { expect: { type: 'object', required: ['connectionError'] } },
       },
       then: {
         not: { required: ['setVars'] },
@@ -596,6 +606,25 @@ const rootSchema = {
 // ── Compile schema ───────────────────────────────────────────────────
 
 const ajv = new Ajv({ allErrors: true, verbose: true });
+
+// Reject regex strings that can never compile, at validation time. Without this
+// an invalid pattern throws SyntaxError only when it is first used at match time
+// — inside the retry loop — so a typo is retried for minutes before reporting.
+ajv.addKeyword({
+  keyword: 'validRegex',
+  type: 'string',
+  errors: false,
+  validate: function validRegex(schemaVal, data) {
+    if (!schemaVal) return true;
+    try {
+      new RegExp(data);
+      return true;
+    } catch {
+      return false;
+    }
+  },
+});
+
 ajvErrors(ajv);
 
 const validate = ajv.compile(rootSchema);

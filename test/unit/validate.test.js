@@ -302,6 +302,14 @@ describe('validateTestDefinitions – expect.connectionError', () => {
       setVars: { FOO: { body: true } },
     }], 'setVars cannot be combined with expect.connectionError');
   });
+
+  it('accepts a valid matches pattern', () => {
+    expectValid(connErr({ matches: 'ECONN(REFUSED|RESET)' }));
+  });
+
+  it('rejects an un-compilable matches pattern', () => {
+    expectInvalid(connErr({ matches: 'ECONN(' }), 'valid regular expression');
+  });
 });
 
 // ── Test type mutual exclusivity ─────────────────────────────────────
@@ -487,6 +495,45 @@ describe('validateTestDefinitions – type errors', () => {
         ],
       },
     }]);
+  });
+});
+
+// ── Regex pattern validation ─────────────────────────────────────────
+
+describe('validateTestDefinitions – regex pattern compile check', () => {
+  it('rejects an un-compilable bodyRegex string', () => {
+    expectInvalid(
+      [{ ...minimalHttp, expect: { bodyRegex: 'ok(' } }],
+      'valid regular expression',
+    );
+  });
+
+  it('rejects an un-compilable bodyRegex object value', () => {
+    expectInvalid(
+      [{ ...minimalHttp, expect: { bodyRegex: { value: 'ok(' } } }],
+      'valid regular expression',
+    );
+  });
+
+  it('rejects an un-compilable HTTP setVars regex pattern', () => {
+    expectInvalid(
+      [{ ...minimalHttp, setVars: { TOK: { regex: { pattern: 'csrf=(', group: 1 } } } }],
+      'valid regular expression',
+    );
+  });
+
+  it('rejects an un-compilable command setVars regex pattern', () => {
+    expectInvalid(
+      [{ ...minimalCommand, setVars: { PID: { regex: { pattern: '(\\d+', group: 1 } } } }],
+      'valid regular expression',
+    );
+  });
+
+  it('accepts valid regex patterns across fields', () => {
+    expectValid([
+      { ...minimalHttp, expect: { bodyRegex: 'ok|success' } },
+      { ...minimalHttp, setVars: { TOK: { regex: { pattern: 'csrf=([a-z]+)', group: 1 } } } },
+    ]);
   });
 });
 
