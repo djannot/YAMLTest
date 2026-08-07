@@ -293,6 +293,15 @@ describe('validateTestDefinitions – expect.connectionError', () => {
       expect: { connectionError: true, bodyContains: 'x' },
     }], 'cannot be combined');
   });
+
+  it('rejects connectionError combined with setVars', () => {
+    expectInvalid([{
+      source: { type: 'local' },
+      http: { url: 'https://example.com' },
+      expect: { connectionError: true },
+      setVars: { FOO: { body: true } },
+    }], 'setVars cannot be combined with expect.connectionError');
+  });
 });
 
 // ── Test type mutual exclusivity ─────────────────────────────────────

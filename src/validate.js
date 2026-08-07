@@ -570,6 +570,19 @@ const testDefinitionSchema = {
         required: ['expect'],
       },
     },
+    // setVars cannot be combined with expect.connectionError: a failed
+    // connection yields no response to extract variables from, and the test
+    // short-circuits before setVars is applied.
+    {
+      if: {
+        required: ['setVars', 'expect'],
+        properties: { expect: { required: ['connectionError'] } },
+      },
+      then: {
+        not: { required: ['setVars'] },
+        errorMessage: 'setVars cannot be combined with expect.connectionError (a failed connection has no response to extract variables from)',
+      },
+    },
   ],
   additionalProperties: true,
 };

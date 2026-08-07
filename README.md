@@ -237,8 +237,14 @@ Notes:
 - If the request unexpectedly **succeeds**, the test fails.
 - Configuration errors (such as an unreadable `cert`/`key`/`ca` file) are *not*
   connection errors and still fail the test loudly.
-- Best supported for `source.type: local`. Pod-based sources wrap transport errors
-  in generic messages, so detection there is best-effort.
+- `connectionError` cannot be combined with `setVars` — a failed connection has
+  no response to extract variables from.
+- Reliably supported only for `source.type: local`. With pod-based sources, only
+  `usePortForward` can detect a connection failure, and the reported error code
+  reflects the local port-forward tunnel's failure (typically `ECONNRESET`), not
+  the remote one. The default debug-pod and pod-exec modes wrap every transport
+  error in a generic message, so `connectionError` will **always fail** the test
+  there — even when the connection really did fail.
 
 #### Environment variable substitution
 
