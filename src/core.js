@@ -1982,6 +1982,20 @@ async function executeCommandTest(test) {
         throw new Error('Kubernetes selector is required for pod-based command tests');
       }
 
+      // Live echo is only implemented for the local executor. On the pod path
+      // the command runs via `kubectl exec` and its output is buffered until the
+      // command completes.
+      //
+      // NOTE: In order to minimize noise, the YAMLTEST_ECHO will not have any effect here.
+      // Warning will happen only when a pod test *explicitly* opts in with `echo: true`.
+      if (commandConfig.echo === true) {
+        const label = test.name || test.test_title;
+        console.warn(
+          `Warning: echo is not supported for pod command tests (source.type: pod)` +
+          `${label ? ` in "${label}"` : ''}; output will only be shown after the command completes.`
+        );
+      }
+
       debugLog(`Using kubectl exec to run command in pod ${JSON.stringify(test.source.selector)}`);
       result = await executePodCommand(test, commandConfig);
     } else {
@@ -2049,6 +2063,14 @@ async function executeLocalCommand(commandConfig) {
 
   debugLog(`Executing shell command (via ${scriptPath}): ${commandConfig.command}`);
 
+  // When enabled, tee the child's stdout/stderr: every chunk is still captured
+  // into the strings below (assertions and the `observed` failure snapshot depend
+  // on that, always), AND simultaneously echoed to our own stdout/stderr as it
+  // arrives so long-running tests show progress live instead of going silent
+  // until they finish. Enable per-test with `command.echo: true` or globally with
+  // YAMLTEST_ECHO=true.
+  const echo = process.env.YAMLTEST_ECHO === 'true' || commandConfig.echo === true;
+
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, {
       env,
@@ -2061,10 +2083,12 @@ async function executeLocalCommand(commandConfig) {
 
     child.stdout.on('data', (data) => {
       stdout += data.toString();
+      if (echo) process.stdout.write(data);
     });
 
     child.stderr.on('data', (data) => {
       stderr += data.toString();
+      if (echo) process.stderr.write(data);
     });
 
     child.on('close', (exitCode) => {
@@ -2077,7 +2101,7 @@ async function executeLocalCommand(commandConfig) {
         stdout: stdout.trim(),
         stderr: stderr.trim(),
         exitCode,
-        output: stdout.trim() // alias for backwards compatibility
+        output: stdout.trim(), // alias for backwards compatibility
       };
 
       // Parse JSON if requested and stdout is not empty
