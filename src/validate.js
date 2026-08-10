@@ -228,6 +228,26 @@ const httpConfigSchema = {
 
 // ── HTTP expect ──────────────────────────────────────────────────────
 
+// connectionError asserts the request fails at the transport level (DNS, TCP,
+// or TLS) before any HTTP response is received. `true` accepts any connection
+// failure; the object form additionally constrains the error's code/message.
+const connectionErrorSchema = {
+  oneOf: [
+    { const: true },   // `false` is rejected — omit connectionError instead of disabling it inline
+    {
+      type: 'object',
+      properties: {
+        code: { type: 'string' },      // e.g. "ECONNREFUSED", "CERT_HAS_EXPIRED"
+        contains: { type: 'string' },  // substring of the error message
+        matches: { type: 'string' },   // regex against the error message
+      },
+      minProperties: 1,
+      additionalProperties: false,
+    },
+  ],
+  errorMessage: 'connectionError must be `true`, or an object with at least one of: code, contains, matches',
+};
+
 const httpExpectSchema = {
   type: 'object',
   properties: {
@@ -250,8 +270,26 @@ const httpExpectSchema = {
       items: headerExpectationItem,
       minItems: 1,
     },
+    connectionError: connectionErrorSchema,
   },
   additionalProperties: false,
+  // A failed connection yields no response, so connectionError cannot be
+  // combined with any response-based expectation.
+  if: { required: ['connectionError'] },
+  then: {
+    not: {
+      anyOf: [
+        { required: ['statusCode'] },
+        { required: ['body'] },
+        { required: ['bodyContains'] },
+        { required: ['bodyRegex'] },
+        { required: ['bodyJsonPath'] },
+        { required: ['headers'] },
+      ],
+    },
+    errorMessage:
+      'expect.connectionError cannot be combined with response-based expectations (statusCode, body, bodyContains, bodyRegex, bodyJsonPath, headers)',
+  },
 };
 
 // ── HTTP setVars ─────────────────────────────────────────────────────
@@ -531,6 +569,19 @@ const testDefinitionSchema = {
       },
       then: {
         required: ['expect'],
+      },
+    },
+    // setVars cannot be combined with expect.connectionError: a failed
+    // connection yields no response to extract variables from, and the test
+    // short-circuits before setVars is applied.
+    {
+      if: {
+        required: ['setVars', 'expect'],
+        properties: { expect: { required: ['connectionError'] } },
+      },
+      then: {
+        not: { required: ['setVars'] },
+        errorMessage: 'setVars cannot be combined with expect.connectionError (a failed connection has no response to extract variables from)',
       },
     },
   ],

@@ -389,3 +389,98 @@ describe('HTTP integration – negated assertions', () => {
     ).resolves.toBe(true);
   });
 });
+
+describe('HTTP integration – connectionError', () => {
+  // A port that is (almost) certainly not listening → ECONNREFUSED.
+  const closedUrl = 'http://127.0.0.1:1';
+
+  it('passes when the connection is refused and connectionError is true', async () => {
+    await expect(
+      executeTest(
+        yaml({
+          http: { url: closedUrl, method: 'GET' },
+          source: { type: 'local' },
+          expect: { connectionError: true },
+        })
+      )
+    ).resolves.toBe(true);
+  });
+
+  it('passes when the error code matches', async () => {
+    await expect(
+      executeTest(
+        yaml({
+          http: { url: closedUrl, method: 'GET' },
+          source: { type: 'local' },
+          expect: { connectionError: { code: 'ECONNREFUSED' } },
+        })
+      )
+    ).resolves.toBe(true);
+  });
+
+  it('passes when the error message matches a substring', async () => {
+    await expect(
+      executeTest(
+        yaml({
+          http: { url: closedUrl, method: 'GET' },
+          source: { type: 'local' },
+          expect: { connectionError: { contains: 'ECONNREFUSED' } },
+        })
+      )
+    ).resolves.toBe(true);
+  });
+
+  it('fails when the error code does not match', async () => {
+    await expect(
+      executeTest(
+        yaml({
+          http: { url: closedUrl, method: 'GET' },
+          source: { type: 'local' },
+          expect: { connectionError: { code: 'ETIMEDOUT' } },
+        })
+      )
+    ).rejects.toThrow(/did not equal "ETIMEDOUT"/);
+  });
+
+  it('passes on a TLS handshake failure (https to a plaintext server)', async () => {
+    await expect(
+      executeTest(
+        yaml({
+          http: { url: baseUrl.replace('http://', 'https://'), method: 'GET' },
+          source: { type: 'local' },
+          expect: { connectionError: true },
+        })
+      )
+    ).resolves.toBe(true);
+  });
+
+  it('fails when a connection error is expected but the request succeeds', async () => {
+    await expect(
+      executeTest(
+        yaml({
+          http: { url: baseUrl, method: 'GET', path: '/health' },
+          source: { type: 'local' },
+          expect: { connectionError: true },
+        })
+      )
+    ).rejects.toThrow(/Expected the connection to fail/);
+  });
+
+  it('fails loudly on a config error (unreadable cert), not treated as a connection error', async () => {
+    // A missing cert file is a plain Error, not a transport failure — connectionError:true
+    // must NOT swallow it into a pass.
+    await expect(
+      executeTest(
+        yaml({
+          http: {
+            url: 'https://127.0.0.1:1',
+            method: 'GET',
+            cert: '/nonexistent/does-not-exist.pem',
+          },
+          source: { type: 'local' },
+          expect: { connectionError: true },
+        })
+      )
+    ).rejects.toThrow(/Failed to read certificate file/);
+  });
+});
