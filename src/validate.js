@@ -577,7 +577,7 @@ const testDefinitionSchema = {
     {
       if: {
         required: ['setVars', 'expect'],
-        properties: { expect: { required: ['connectionError'] } },
+        properties: { expect: { type: 'object', required: ['connectionError'] } },
       },
       then: {
         not: { required: ['setVars'] },
