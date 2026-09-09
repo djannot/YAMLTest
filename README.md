@@ -79,6 +79,7 @@ OPTIONS
 
 ENVIRONMENT
   DEBUG_MODE=true       Enable verbose debug logging
+  YAMLTEST_ECHO=true    Echo every local command's output live as it runs
   NO_COLOR=1            Disable ANSI colour output
 ```
 
@@ -193,6 +194,59 @@ Test any HTTP endpoint locally or from within a Kubernetes pod.
         value: application/json
 ```
 
+#### Asserting a connection failure
+
+Use `expect.connectionError` to assert that the request **never completes** — the
+connection is refused, DNS fails, or the TLS handshake is rejected. This replaces
+the old workaround of a command test (`curl ... || true` with `equals: "000"`).
+
+```yaml
+- name: mTLS is enforced (handshake must fail without a client cert)
+  http:
+    url: "https://secure.example.com"
+    path: "/"
+  source:
+    type: local
+  expect:
+    connectionError: true
+```
+
+`connectionError: true` passes on any transport-level failure (DNS, TCP, or TLS)
+and is what most tests should use. To assert on a *specific* failure, use the
+object form — any of `code`, `contains`, or `matches` (all provided constraints
+must hold):
+
+```yaml
+  expect:
+    connectionError:
+      code: "ECONNREFUSED"        # exact error code (see below)
+      contains: "ECONNREFUSED"    # substring of the error message
+      matches: "ECONN(REFUSED|RESET)" # regex against the error message
+```
+
+The `code` is matched exactly against Node's error code. Common ones:
+`ECONNREFUSED` (port closed), `ENOTFOUND` (DNS failure), `EPROTO` (TLS spoken to
+a plaintext port), `DEPTH_ZERO_SELF_SIGNED_CERT` (untrusted cert). The exact
+string depends on your Node/OpenSSL version, so the reliable way to find it is to
+run the test once and read the reported error rather than guessing.
+
+Notes:
+
+- `connectionError` cannot be combined with response-based expectations
+  (`statusCode`, `body`, `bodyContains`, `bodyRegex`, `bodyJsonPath`, `headers`) —
+  a failed connection produces no response to assert on.
+- If the request unexpectedly **succeeds**, the test fails.
+- Configuration errors (such as an unreadable `cert`/`key`/`ca` file) are *not*
+  connection errors and still fail the test loudly.
+- `connectionError` cannot be combined with `setVars` — a failed connection has
+  no response to extract variables from.
+- Reliably supported only for `source.type: local`. With pod-based sources, only
+  `usePortForward` can detect a connection failure, and the reported error code
+  reflects the local port-forward tunnel's failure (typically `ECONNRESET`), not
+  the remote one. The default debug-pod and pod-exec modes wrap every transport
+  error in a generic message, so `connectionError` will **always fail** the test
+  there — even when the connection really did fail.
+
 #### Environment variable substitution
 
 Any `$VAR` or `${VAR}` in the `url`, `path`, `headers`, `body`, or `params` fields is resolved from the environment:
@@ -260,6 +314,7 @@ Run any shell command and validate its output.
   command:
     command: "kubectl version -short"
     parseJson: false              # parse stdout as JSON (default: false)
+    echo: true                    # echo the command's output live (default: false)
     env:
       MY_VAR: value               # extra environment variables
     workingDir: /tmp              # working directory
@@ -272,6 +327,29 @@ Run any shell command and validate its output.
     stderr:
       contains: ""
 ```
+
+#### Echoing output for long-running commands
+
+By default a command's stdout/stderr is captured silently and only shown at the
+end (and only for failing tests). For a long-running command — a browser flow, a
+multi-minute integration script — that means a blank screen until it finishes. Set
+`echo: true` to tee the command's output to your terminal **as it is produced**,
+while still capturing it for the assertions:
+
+```yaml
+- name: long oauth flow
+  command:
+    command: "./run-oauth-flow.sh"
+    echo: true
+  source:
+    type: local
+  expect:
+    exitCode: 0
+```
+
+Set it globally instead of per-test with the `YAMLTEST_ECHO=true` environment
+variable. Echoing applies to `source.type: local` commands. Because the live
+output interleaves with the `✓`/`✗` summary, it is off by default.
 
 Multiple stdout expectations (all must pass):
 

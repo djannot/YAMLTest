@@ -245,6 +245,65 @@ describe('validateTestDefinitions – valid inputs', () => {
   });
 });
 
+// ── connectionError expectation ──────────────────────────────────────
+
+describe('validateTestDefinitions – expect.connectionError', () => {
+  const connErr = (connectionError) => [{
+    source: { type: 'local' },
+    http: { url: 'https://example.com' },
+    expect: { connectionError },
+  }];
+
+  it('accepts connectionError: true', () => {
+    expectValid(connErr(true));
+  });
+
+  it('rejects connectionError: false (omit it instead of disabling inline)', () => {
+    expectInvalid(connErr(false));
+  });
+
+  it('accepts connectionError with a code constraint', () => {
+    expectValid(connErr({ code: 'ECONNREFUSED' }));
+  });
+
+  it('accepts connectionError with contains and matches constraints', () => {
+    expectValid(connErr({ contains: 'handshake', matches: 'TLS|SSL' }));
+  });
+
+  it('rejects an empty connectionError object', () => {
+    expectInvalid(connErr({}));
+  });
+
+  it('rejects an unknown key inside connectionError', () => {
+    expectInvalid(connErr({ foo: 'bar' }));
+  });
+
+  it('rejects connectionError combined with statusCode', () => {
+    expectInvalid([{
+      source: { type: 'local' },
+      http: { url: 'https://example.com' },
+      expect: { connectionError: true, statusCode: 200 },
+    }], 'cannot be combined');
+  });
+
+  it('rejects connectionError combined with bodyContains', () => {
+    expectInvalid([{
+      source: { type: 'local' },
+      http: { url: 'https://example.com' },
+      expect: { connectionError: true, bodyContains: 'x' },
+    }], 'cannot be combined');
+  });
+
+  it('rejects connectionError combined with setVars', () => {
+    expectInvalid([{
+      source: { type: 'local' },
+      http: { url: 'https://example.com' },
+      expect: { connectionError: true },
+      setVars: { FOO: { body: true } },
+    }], 'setVars cannot be combined with expect.connectionError');
+  });
+});
+
 // ── Test type mutual exclusivity ─────────────────────────────────────
 
 describe('validateTestDefinitions – mutual exclusivity', () => {

@@ -37,6 +37,64 @@ function attachObserved(error, observed) {
 }
 
 /**
+ * Extract the most specific error code from a (possibly wrapped) error.
+ * @param {*} error
+ * @returns {string|undefined}
+ */
+function errorCode(error) {
+  if (!error) return undefined;
+  return error.code || (error.cause && error.cause.code) || undefined;
+}
+
+/**
+ * Determine whether an error represents a transport/connection-level failure
+ * (DNS resolution, TCP connect, or TLS handshake) rather than a completed HTTP
+ * response or a configuration error (e.g. an unreadable cert file).
+ *
+ * HTTP requests are made with `validateStatus: () => true`, so axios only rejects
+ * when no response was received — i.e. the connection itself failed. Any
+ * AxiosError without a `.response` is therefore a connection failure. (Config
+ * errors such as an unreadable cert are plain Errors, not AxiosErrors, so they
+ * correctly fail the test instead of being treated as an expected failure.)
+ * @param {*} error
+ * @returns {boolean}
+ */
+function isConnectionError(error) {
+  return !!(error && error.isAxiosError && !error.response);
+}
+
+/**
+ * Validate that a caught connection error satisfies the test's `connectionError`
+ * expectation. `spec` is either `true` (any connection failure passes) or an
+ * object with optional `code` / `contains` / `matches` constraints on the error.
+ * Throws with a descriptive message if the failure does not match.
+ * @param {*} error - The caught transport-level error
+ * @param {boolean|object} spec - The `expect.connectionError` value
+ * @param {string} testName
+ */
+function validateConnectionError(error, spec, testName) {
+  const message = error?.message || String(error);
+  const code = errorCode(error);
+  debugLog(`Connection failed for ${testName}: code=${code || 'n/a'}, message="${message}"`);
+
+  if (spec === null || typeof spec !== 'object') {
+    // `true` (or any non-object truthy value): any connection failure passes.
+    return;
+  }
+
+  if (spec.code !== undefined && spec.code !== code) {
+    throw new Error(`Connection failed as expected, but error code "${code || '(none)'}" did not equal "${spec.code}"`);
+  }
+  if (spec.contains !== undefined && !message.includes(spec.contains)) {
+    throw new Error(`Connection failed as expected, but error message did not contain "${spec.contains}" (got: "${message}")`);
+  }
+  if (spec.matches !== undefined && !new RegExp(spec.matches).test(message)) {
+    throw new Error(`Connection failed as expected, but error message did not match /${spec.matches}/ (got: "${message}")`);
+  }
+  debugLog(`✓ Connection error matched expectation for: ${testName}`);
+}
+
+/**
  * Builds kubectl command argument parts for resource selection
  * @param {object} selector - The Kubernetes selector
  * @returns {object} - Object containing command argument parts
@@ -80,7 +138,9 @@ module.exports = {
   executeHttpBodyComparisonTest,
   filterJsonByJsonPath,
   executePodHttpRequestViaPodExec,
-  applySetVars
+  applySetVars,
+  isConnectionError,
+  validateConnectionError
 };
 
 /**
@@ -677,6 +737,7 @@ async function executeHttpTest(test) {
   }
 
   let response;
+  const expectConnErr = test.expect && test.expect.connectionError;
 
   try {
     debugLog(`Executing HTTP test: ${testName}`);
@@ -689,18 +750,40 @@ async function executeHttpTest(test) {
       sourceType: test.source.type
     }, null, 2)}`);
 
-    if (test.source.type === 'local') {
-      debugLog('Using local HTTP client');
-      response = await executeLocalHttpRequest(test.http);
-    } else if (test.source.type === 'pod') {
-      if (!test.source.selector) {
-        throw new Error('Kubernetes selector is required for pod-based tests');
-      }
+    // Dispatch the request. When `expect.connectionError` is set, a thrown
+    // transport-level failure (DNS/TCP/TLS) is the success condition rather than
+    // a test error, so we intercept it here before the outer catch records a
+    // failure. Configuration errors (e.g. an unreadable cert) are NOT connection
+    // errors and still fail loudly.
+    try {
+      if (test.source.type === 'local') {
+        debugLog('Using local HTTP client');
+        response = await executeLocalHttpRequest(test.http);
+      } else if (test.source.type === 'pod') {
+        if (!test.source.selector) {
+          throw new Error('Kubernetes selector is required for pod-based tests');
+        }
 
-      debugLog(`Using kubectl debug to access pod ${JSON.stringify(test.source.selector)}`);
-      response = await executePodHttpRequest(test);
-    } else {
-      throw new Error(`Unsupported source type: ${test.source.type}`);
+        debugLog(`Using kubectl debug to access pod ${JSON.stringify(test.source.selector)}`);
+        response = await executePodHttpRequest(test);
+      } else {
+        throw new Error(`Unsupported source type: ${test.source.type}`);
+      }
+    } catch (requestError) {
+      if (expectConnErr && isConnectionError(requestError)) {
+        // The connection failed, which is exactly what the test asserted.
+        validateConnectionError(requestError, test.expect.connectionError, testName);
+        debugLog(`Test passed (connection failed as expected): ${testName}`);
+        return true;
+      }
+      throw requestError;
+    }
+
+    // A response was received. If a connection error was expected, that's a failure.
+    if (expectConnErr) {
+      throw new Error(
+        `Expected the connection to fail, but the request succeeded with status code ${response.statusCode}`
+      );
     }
 
     // Log the response details at debug level
@@ -1903,6 +1986,20 @@ async function executeCommandTest(test) {
         throw new Error('Kubernetes selector is required for pod-based command tests');
       }
 
+      // Live echo is only implemented for the local executor. On the pod path
+      // the command runs via `kubectl exec` and its output is buffered until the
+      // command completes.
+      //
+      // NOTE: In order to minimize noise, the YAMLTEST_ECHO will not have any effect here.
+      // Warning will happen only when a pod test *explicitly* opts in with `echo: true`.
+      if (commandConfig.echo === true) {
+        const label = test.name || test.test_title;
+        console.warn(
+          `Warning: echo is not supported for pod command tests (source.type: pod)` +
+          `${label ? ` in "${label}"` : ''}; output will only be shown after the command completes.`
+        );
+      }
+
       debugLog(`Using kubectl exec to run command in pod ${JSON.stringify(test.source.selector)}`);
       result = await executePodCommand(test, commandConfig);
     } else {
@@ -1970,6 +2067,14 @@ async function executeLocalCommand(commandConfig) {
 
   debugLog(`Executing shell command (via ${scriptPath}): ${commandConfig.command}`);
 
+  // When enabled, tee the child's stdout/stderr: every chunk is still captured
+  // into the strings below (assertions and the `observed` failure snapshot depend
+  // on that, always), AND simultaneously echoed to our own stdout/stderr as it
+  // arrives so long-running tests show progress live instead of going silent
+  // until they finish. Enable per-test with `command.echo: true` or globally with
+  // YAMLTEST_ECHO=true.
+  const echo = process.env.YAMLTEST_ECHO === 'true' || commandConfig.echo === true;
+
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, {
       env,
@@ -1982,10 +2087,12 @@ async function executeLocalCommand(commandConfig) {
 
     child.stdout.on('data', (data) => {
       stdout += data.toString();
+      if (echo) process.stdout.write(data);
     });
 
     child.stderr.on('data', (data) => {
       stderr += data.toString();
+      if (echo) process.stderr.write(data);
     });
 
     child.on('close', (exitCode) => {
@@ -1998,7 +2105,7 @@ async function executeLocalCommand(commandConfig) {
         stdout: stdout.trim(),
         stderr: stderr.trim(),
         exitCode,
-        output: stdout.trim() // alias for backwards compatibility
+        output: stdout.trim(), // alias for backwards compatibility
       };
 
       // Parse JSON if requested and stdout is not empty
