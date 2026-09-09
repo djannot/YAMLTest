@@ -16,6 +16,84 @@ function debugLog(...args) {
   }
 }
 
+// Monotonic counter for unique temp script filenames within a single process.
+let __localCommandSeq = 0;
+function nextLocalCommandId() {
+  __localCommandSeq += 1;
+  return __localCommandSeq;
+}
+
+/**
+ * Attach an "observed" snapshot (the actual request/response or command result)
+ * to an Error so callers can surface *why* a test failed without re-running it
+ * under DEBUG_MODE. Only attaches once and never overwrites an existing snapshot
+ * (the innermost failure wins).
+ */
+function attachObserved(error, observed) {
+  if (error && typeof error === 'object' && observed && !error.observed) {
+    try { error.observed = observed; } catch (_) { /* frozen error - ignore */ }
+  }
+  return error;
+}
+
+/**
+ * Extract the most specific error code from a (possibly wrapped) error.
+ * @param {*} error
+ * @returns {string|undefined}
+ */
+function errorCode(error) {
+  if (!error) return undefined;
+  return error.code || (error.cause && error.cause.code) || undefined;
+}
+
+/**
+ * Determine whether an error represents a transport/connection-level failure
+ * (DNS resolution, TCP connect, or TLS handshake) rather than a completed HTTP
+ * response or a configuration error (e.g. an unreadable cert file).
+ *
+ * HTTP requests are made with `validateStatus: () => true`, so axios only rejects
+ * when no response was received — i.e. the connection itself failed. Any
+ * AxiosError without a `.response` is therefore a connection failure. (Config
+ * errors such as an unreadable cert are plain Errors, not AxiosErrors, so they
+ * correctly fail the test instead of being treated as an expected failure.)
+ * @param {*} error
+ * @returns {boolean}
+ */
+function isConnectionError(error) {
+  return !!(error && error.isAxiosError && !error.response);
+}
+
+/**
+ * Validate that a caught connection error satisfies the test's `connectionError`
+ * expectation. `spec` is either `true` (any connection failure passes) or an
+ * object with optional `code` / `contains` / `matches` constraints on the error.
+ * Throws with a descriptive message if the failure does not match.
+ * @param {*} error - The caught transport-level error
+ * @param {boolean|object} spec - The `expect.connectionError` value
+ * @param {string} testName
+ */
+function validateConnectionError(error, spec, testName) {
+  const message = error?.message || String(error);
+  const code = errorCode(error);
+  debugLog(`Connection failed for ${testName}: code=${code || 'n/a'}, message="${message}"`);
+
+  if (spec === null || typeof spec !== 'object') {
+    // `true` (or any non-object truthy value): any connection failure passes.
+    return;
+  }
+
+  if (spec.code !== undefined && spec.code !== code) {
+    throw new Error(`Connection failed as expected, but error code "${code || '(none)'}" did not equal "${spec.code}"`);
+  }
+  if (spec.contains !== undefined && !message.includes(spec.contains)) {
+    throw new Error(`Connection failed as expected, but error message did not contain "${spec.contains}" (got: "${message}")`);
+  }
+  if (spec.matches !== undefined && !new RegExp(spec.matches).test(message)) {
+    throw new Error(`Connection failed as expected, but error message did not match /${spec.matches}/ (got: "${message}")`);
+  }
+  debugLog(`✓ Connection error matched expectation for: ${testName}`);
+}
+
 /**
  * Builds kubectl command argument parts for resource selection
  * @param {object} selector - The Kubernetes selector
@@ -68,7 +146,9 @@ module.exports = {
   executeHttpBodyComparisonTest,
   filterJsonByJsonPath,
   executePodHttpRequestViaPodExec,
-  applySetVars
+  applySetVars,
+  isConnectionError,
+  validateConnectionError
 };
 
 /**
@@ -639,11 +719,29 @@ async function executeHttpTest(test) {
     }
   }
 
+  // Resolve environment variables in the request body
+  if (typeof test.http.body === 'string') {
+    test.http.body = resolveEnvVarsInString(test.http.body);
+  }
+
+  // Resolve environment variables in query params (keys and string values)
+  if (test.http.params && typeof test.http.params === 'object') {
+    const resolvedParams = {};
+    for (const [key, value] of Object.entries(test.http.params)) {
+      const resolvedKey = resolveEnvVarsInString(key);
+      resolvedParams[resolvedKey] = typeof value === 'string' ? resolveEnvVarsInString(value) : value;
+    }
+    test.http.params = resolvedParams;
+  }
+
   // Create a descriptive test name
   let testName = `${test.http.method} ${test.http.url}${test.http.path}`;
   if (test.source.type === 'pod' && test.source.selector) {
     testName += ` (via pod ${test.source.selector.metadata.namespace || 'default'}/${test.source.selector.metadata.name || '<selector>'})`;
   }
+
+  let response;
+  const expectConnErr = test.expect && test.expect.connectionError;
 
   try {
     debugLog(`Executing HTTP test: ${testName}`);
@@ -656,20 +754,40 @@ async function executeHttpTest(test) {
       sourceType: test.source.type
     }, null, 2)}`);
 
-    let response;
+    // Dispatch the request. When `expect.connectionError` is set, a thrown
+    // transport-level failure (DNS/TCP/TLS) is the success condition rather than
+    // a test error, so we intercept it here before the outer catch records a
+    // failure. Configuration errors (e.g. an unreadable cert) are NOT connection
+    // errors and still fail loudly.
+    try {
+      if (test.source.type === 'local') {
+        debugLog('Using local HTTP client');
+        response = await executeLocalHttpRequest(test.http);
+      } else if (test.source.type === 'pod') {
+        if (!test.source.selector) {
+          throw new Error('Kubernetes selector is required for pod-based tests');
+        }
 
-    if (test.source.type === 'local') {
-      debugLog('Using local HTTP client');
-      response = await executeLocalHttpRequest(test.http);
-    } else if (test.source.type === 'pod') {
-      if (!test.source.selector) {
-        throw new Error('Kubernetes selector is required for pod-based tests');
+        debugLog(`Using kubectl debug to access pod ${JSON.stringify(test.source.selector)}`);
+        response = await executePodHttpRequest(test);
+      } else {
+        throw new Error(`Unsupported source type: ${test.source.type}`);
       }
+    } catch (requestError) {
+      if (expectConnErr && isConnectionError(requestError)) {
+        // The connection failed, which is exactly what the test asserted.
+        validateConnectionError(requestError, test.expect.connectionError, testName);
+        debugLog(`Test passed (connection failed as expected): ${testName}`);
+        return true;
+      }
+      throw requestError;
+    }
 
-      debugLog(`Using kubectl debug to access pod ${JSON.stringify(test.source.selector)}`);
-      response = await executePodHttpRequest(test);
-    } else {
-      throw new Error(`Unsupported source type: ${test.source.type}`);
+    // A response was received. If a connection error was expected, that's a failure.
+    if (expectConnErr) {
+      throw new Error(
+        `Expected the connection to fail, but the request succeeded with status code ${response.statusCode}`
+      );
     }
 
     // Log the response details at debug level
@@ -691,7 +809,19 @@ async function executeHttpTest(test) {
   } catch (error) {
     debugLog(`Test failed: ${testName}`);
     debugLog(error?.message || String(error));
-    throw error; // Re-throw to ensure Mocha catches the failure
+    attachObserved(error, {
+      type: 'http',
+      request: {
+        method: test.http.method,
+        url: (test.http.url || '') + (test.http.path || ''),
+        headers: test.http.headers || {},
+        body: test.http.body || null,
+      },
+      response: response
+        ? { statusCode: response.statusCode, headers: response.headers, body: response.body }
+        : null,
+    });
+    throw error; // Re-throw so the runner records the failure (and the observed snapshot)
   }
   return true;
 }
@@ -1075,6 +1205,26 @@ async function executePodHttpRequestViaPodExec(test) {
       targetUrl += httpConfig.path;
     }
 
+    // If the URL is an IP address and a Host header is set, use --resolve so curl
+    // uses the hostname for TLS SNI — matching how axios behaves for local requests.
+    const parsedTargetUrl = new URL(targetUrl);
+    const hostHeader = httpConfig.headers && Object.entries(httpConfig.headers).find(
+      ([k]) => k.toLowerCase() === 'host'
+    );
+    const urlHostIsIp = net.isIP(parsedTargetUrl.hostname) !== 0;
+    if (urlHostIsIp && hostHeader) {
+      const sniHostname = hostHeader[1];
+      const originalIp = parsedTargetUrl.hostname;
+      const port = parsedTargetUrl.port || (parsedTargetUrl.protocol === 'https:' ? '443' : '80');
+      // Rewrite the URL to use the hostname so curl sends SNI correctly
+      parsedTargetUrl.hostname = sniHostname;
+      parsedTargetUrl.port = port;
+      targetUrl = parsedTargetUrl.toString();
+      // --resolve maps hostname:port to the original IP so the connection still goes to the right place
+      curlCmd += ` --resolve '${sniHostname}:${port}:${originalIp}'`;
+      debugLog(`Added --resolve for SNI: ${sniHostname}:${port}:${originalIp}`);
+    }
+
     curlCmd += ` '${targetUrl}'`;
 
     // Build kubectl exec command
@@ -1181,7 +1331,7 @@ function parseCurlResponse(curlOutput) {
 
   // Parse status line
   if (lines.length > 0 && lines[0].startsWith('HTTP/')) {
-    const statusMatch = lines[0].match(/HTTP\/\d+\.\d+\s+(\d+)/);
+    const statusMatch = lines[0].match(/HTTP\/\d+(?:\.\d+)?\s+(\d+)/);
     if (statusMatch) {
       statusCode = parseInt(statusMatch[1], 10);
     }
@@ -1525,8 +1675,9 @@ function validateHttpExpectations(response, expect, testName) {
       const regexNegate = typeof bodyRegexItem === 'object' && 'negate' in bodyRegexItem && bodyRegexItem.negate;
       const regexValue = bodyRegexItem.value || bodyRegexItem;
       const negate = regexNegate ? bodyRegexItem.negate : false;
+      const caseInsensitive = typeof bodyRegexItem === 'object' && bodyRegexItem.caseInsensitive === true;
 
-      const re = new RegExp(regexValue);
+      const re = new RegExp(regexValue, caseInsensitive ? 'i' : '');
       const matches = re.test(rawBody);
 
       if (negate ? matches : !matches) {
@@ -1819,6 +1970,8 @@ async function executeCommandTest(test) {
     testName += ` (via pod ${test.source.selector.metadata.namespace || 'default'}/${test.source.selector.metadata.name || '<selector>'})`;
   }
 
+  let result;
+
   try {
     debugLog(`Executing command test: ${testName}`);
     debugLog(`Command details: ${JSON.stringify({
@@ -1829,14 +1982,26 @@ async function executeCommandTest(test) {
       parseJson: commandConfig.parseJson || false
     }, null, 2)}`);
 
-    let result;
-
     if (test.source.type === 'local') {
       debugLog('Using local command execution');
       result = await executeLocalCommand(commandConfig);
     } else if (test.source.type === 'pod') {
       if (!test.source.selector) {
         throw new Error('Kubernetes selector is required for pod-based command tests');
+      }
+
+      // Live echo is only implemented for the local executor. On the pod path
+      // the command runs via `kubectl exec` and its output is buffered until the
+      // command completes.
+      //
+      // NOTE: In order to minimize noise, the YAMLTEST_ECHO will not have any effect here.
+      // Warning will happen only when a pod test *explicitly* opts in with `echo: true`.
+      if (commandConfig.echo === true) {
+        const label = test.name || test.test_title;
+        console.warn(
+          `Warning: echo is not supported for pod command tests (source.type: pod)` +
+          `${label ? ` in "${label}"` : ''}; output will only be shown after the command completes.`
+        );
       }
 
       debugLog(`Using kubectl exec to run command in pod ${JSON.stringify(test.source.selector)}`);
@@ -1861,6 +2026,13 @@ async function executeCommandTest(test) {
   } catch (error) {
     debugLog(`✗ Command test failed: ${testName}`);
     debugLog(`Error: ${error.message}`);
+    attachObserved(error, {
+      type: 'command',
+      command: commandConfig.command,
+      result: result
+        ? { exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr }
+        : null,
+    });
     throw error;
   }
 }
@@ -1872,15 +2044,40 @@ async function executeCommandTest(test) {
  */
 async function executeLocalCommand(commandConfig) {
   const { spawn } = require('child_process');
+  const os = require('os');
+  const path = require('path');
 
   const env = { ...process.env, ...(commandConfig.env || {}) };
   const cwd = commandConfig.workingDir || process.cwd();
+  const isWin = process.platform === 'win32';
 
-  // Execute command through shell to support pipes and other shell features
-  const cmd = process.platform === 'win32' ? 'cmd' : 'sh';
-  const args = process.platform === 'win32' ? ['/c', commandConfig.command] : ['-c', commandConfig.command];
+  // Run the command from a temp *script file* (`sh <file>`), rather than passing
+  // the whole script inline as `sh -c "<script>"`. This keeps the script body OUT
+  // of the shell process's command line. Otherwise a pattern-based process tool the
+  // script itself runs — e.g. `pkill -f "some-server"` for cleanup — can match the
+  // shell that is running the test (because its argv literally contains that text)
+  // and kill it, making the command exit with a null code. Running from a file also
+  // sidesteps ARG_MAX limits and argv quoting pitfalls for large commands.
+  const ext = isWin ? 'cmd' : 'sh';
+  const scriptPath = path.join(os.tmpdir(), `yamltest-cmd-${process.pid}-${Date.now()}-${nextLocalCommandId()}.${ext}`);
+  fs.writeFileSync(scriptPath, commandConfig.command, { encoding: 'utf8' });
 
-  debugLog(`Executing shell command: ${commandConfig.command}`);
+  const cleanup = () => {
+    try { fs.unlinkSync(scriptPath); } catch (_) { /* already gone */ }
+  };
+
+  const cmd = isWin ? 'cmd' : 'sh';
+  const args = isWin ? ['/c', scriptPath] : [scriptPath];
+
+  debugLog(`Executing shell command (via ${scriptPath}): ${commandConfig.command}`);
+
+  // When enabled, tee the child's stdout/stderr: every chunk is still captured
+  // into the strings below (assertions and the `observed` failure snapshot depend
+  // on that, always), AND simultaneously echoed to our own stdout/stderr as it
+  // arrives so long-running tests show progress live instead of going silent
+  // until they finish. Enable per-test with `command.echo: true` or globally with
+  // YAMLTEST_ECHO=true.
+  const echo = process.env.YAMLTEST_ECHO === 'true' || commandConfig.echo === true;
 
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, {
@@ -1894,13 +2091,16 @@ async function executeLocalCommand(commandConfig) {
 
     child.stdout.on('data', (data) => {
       stdout += data.toString();
+      if (echo) process.stdout.write(data);
     });
 
     child.stderr.on('data', (data) => {
       stderr += data.toString();
+      if (echo) process.stderr.write(data);
     });
 
     child.on('close', (exitCode) => {
+      cleanup();
       debugLog(`Command completed with exit code: ${exitCode}`);
       debugLog(`stdout: ${stdout}`);
       debugLog(`stderr: ${stderr}`);
@@ -1909,7 +2109,7 @@ async function executeLocalCommand(commandConfig) {
         stdout: stdout.trim(),
         stderr: stderr.trim(),
         exitCode,
-        output: stdout.trim() // alias for backwards compatibility
+        output: stdout.trim(), // alias for backwards compatibility
       };
 
       // Parse JSON if requested and stdout is not empty
@@ -1928,6 +2128,7 @@ async function executeLocalCommand(commandConfig) {
     });
 
     child.on('error', (error) => {
+      cleanup();
       debugLog(`Command execution error: ${error.message}`);
       reject(new Error(`Failed to execute command: ${error.message}`));
     });
@@ -2344,6 +2545,18 @@ async function executeHttpRequestInternal(requestConfig) {
 
   // Resolve environment variables in URL
   requestConfig.http.url = resolveEnvVarsInUrl(requestConfig.http.url);
+
+  // Resolve environment variables in headers and body
+  if (requestConfig.http.headers && typeof requestConfig.http.headers === 'object') {
+    for (const [key, value] of Object.entries(requestConfig.http.headers)) {
+      if (typeof value === 'string') {
+        requestConfig.http.headers[key] = resolveEnvVarsInString(value);
+      }
+    }
+  }
+  if (typeof requestConfig.http.body === 'string') {
+    requestConfig.http.body = resolveEnvVarsInString(requestConfig.http.body);
+  }
 
   let response;
 

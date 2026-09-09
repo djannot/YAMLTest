@@ -4,6 +4,7 @@ export default defineConfig({
   test: {
     globals: true,
     environment: 'node',
+    setupFiles: ['./test/setup.js'],
     // Run each test *file* sequentially to avoid port collisions between
     // integration/e2e servers and to keep CJS module isolation predictable.
     fileParallelism: false,

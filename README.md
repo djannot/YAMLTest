@@ -71,11 +71,23 @@ USAGE
 
 OPTIONS
   -f, --file <path|->   YAML file to run, or - for stdin
+  --retries <n>         Force the retry count for every test, overriding the
+                        per-test `retries` and the default. Use --retries 0 to
+                        run once when debugging a failure.
+  --check               Validate YAML structure only; do not run tests
   -h, --help            Show this help
 
 ENVIRONMENT
   DEBUG_MODE=true       Enable verbose debug logging
+  YAMLTEST_ECHO=true    Echo every local command's output live as it runs
   NO_COLOR=1            Disable ANSI colour output
+```
+
+When a test fails and you want to debug it, run the same file with `--retries 0`
+so it executes exactly once instead of retrying up to the default 120 times:
+
+```bash
+yamltest -f test.yaml --retries 0
 ```
 
 Exit codes: `0` = all passed, `1` = one or more failed.
@@ -171,7 +183,7 @@ Test any HTTP endpoint locally or from within a Kubernetes pod.
     statusCode: 200                   # or [200, 201, 202]
     body: "exact body match"
     bodyContains: "substring"         # or array, or {value, negate, matchword}
-    bodyRegex: "pattern.*"            # or {value, negate}
+    bodyRegex: "pattern.*"            # or {value, negate, caseInsensitive}
     bodyJsonPath:
       - path: "$.user.id"
         comparator: equals
@@ -182,13 +194,69 @@ Test any HTTP endpoint locally or from within a Kubernetes pod.
         value: application/json
 ```
 
+#### Asserting a connection failure
+
+Use `expect.connectionError` to assert that the request **never completes** — the
+connection is refused, DNS fails, or the TLS handshake is rejected. This replaces
+the old workaround of a command test (`curl ... || true` with `equals: "000"`).
+
+```yaml
+- name: mTLS is enforced (handshake must fail without a client cert)
+  http:
+    url: "https://secure.example.com"
+    path: "/"
+  source:
+    type: local
+  expect:
+    connectionError: true
+```
+
+`connectionError: true` passes on any transport-level failure (DNS, TCP, or TLS)
+and is what most tests should use. To assert on a *specific* failure, use the
+object form — any of `code`, `contains`, or `matches` (all provided constraints
+must hold):
+
+```yaml
+  expect:
+    connectionError:
+      code: "ECONNREFUSED"        # exact error code (see below)
+      contains: "ECONNREFUSED"    # substring of the error message
+      matches: "ECONN(REFUSED|RESET)" # regex against the error message
+```
+
+The `code` is matched exactly against Node's error code. Common ones:
+`ECONNREFUSED` (port closed), `ENOTFOUND` (DNS failure), `EPROTO` (TLS spoken to
+a plaintext port), `DEPTH_ZERO_SELF_SIGNED_CERT` (untrusted cert). The exact
+string depends on your Node/OpenSSL version, so the reliable way to find it is to
+run the test once and read the reported error rather than guessing.
+
+Notes:
+
+- `connectionError` cannot be combined with response-based expectations
+  (`statusCode`, `body`, `bodyContains`, `bodyRegex`, `bodyJsonPath`, `headers`) —
+  a failed connection produces no response to assert on.
+- If the request unexpectedly **succeeds**, the test fails.
+- Configuration errors (such as an unreadable `cert`/`key`/`ca` file) are *not*
+  connection errors and still fail the test loudly.
+- `connectionError` cannot be combined with `setVars` — a failed connection has
+  no response to extract variables from.
+- Reliably supported only for `source.type: local`. With pod-based sources, only
+  `usePortForward` can detect a connection failure, and the reported error code
+  reflects the local port-forward tunnel's failure (typically `ECONNRESET`), not
+  the remote one. The default debug-pod and pod-exec modes wrap every transport
+  error in a generic message, so `connectionError` will **always fail** the test
+  there — even when the connection really did fail.
+
 #### Environment variable substitution
 
-Any `$VAR` or `${VAR}` in the `url` field is resolved from the environment:
+Any `$VAR` or `${VAR}` in the `url`, `headers`, or `body` fields is resolved from the environment:
 
 ```yaml
 http:
   url: "${API_BASE_URL}"
+  headers:
+    Authorization: "Bearer ${API_TOKEN}"
+  body: '{"id": "${REQUEST_ID}"}'
 ```
 
 #### Pod-based HTTP test
@@ -243,6 +311,7 @@ Run any shell command and validate its output.
   command:
     command: "kubectl version -short"
     parseJson: false              # parse stdout as JSON (default: false)
+    echo: true                    # echo the command's output live (default: false)
     env:
       MY_VAR: value               # extra environment variables
     workingDir: /tmp              # working directory
@@ -255,6 +324,29 @@ Run any shell command and validate its output.
     stderr:
       contains: ""
 ```
+
+#### Echoing output for long-running commands
+
+By default a command's stdout/stderr is captured silently and only shown at the
+end (and only for failing tests). For a long-running command — a browser flow, a
+multi-minute integration script — that means a blank screen until it finishes. Set
+`echo: true` to tee the command's output to your terminal **as it is produced**,
+while still capturing it for the assertions:
+
+```yaml
+- name: long oauth flow
+  command:
+    command: "./run-oauth-flow.sh"
+    echo: true
+  source:
+    type: local
+  expect:
+    exitCode: 0
+```
+
+Set it globally instead of per-test with the `YAMLTEST_ECHO=true` environment
+variable. Echoing applies to `source.type: local` commands. Because the live
+output interleaves with the `✓`/`✗` summary, it is off by default.
 
 Multiple stdout expectations (all must pass):
 
@@ -398,11 +490,28 @@ expect:
 
 ## Advanced features
 
-### Retry on failure
+### Run control: retries, consecutive, timeout, maxtime
+
+Each test definition accepts four optional run-control knobs. All have defaults
+tuned for waiting on eventually-consistent systems, and all defaults are
+overridable per run via environment variables (so you never have to edit the
+test to tune them):
+
+| Field | Meaning | Default | Env override |
+|-------|---------|---------|--------------|
+| `retries` | Max retry attempts **after** the first | `120` | `YAMLTEST_RETRIES` |
+| `consecutive` | Successful runs required **per attempt** (all must pass in a row) | `1` | — |
+| `timeout` | Per-attempt cap, in ms (a hung attempt is abandoned and retried) | `10000` | `YAMLTEST_TIMEOUT_MS` |
+| `maxtime` | Wall-clock cap on the **whole** retry loop — the circuit breaker | `max(180000, timeout + 60000)` | `YAMLTEST_MAXTIME_MS` (floor) |
+
+`maxtime` accepts either a number of milliseconds or a duration string
+(`"500ms"`, `"30s"`, `"3m"`, `"1h"`). The retry loop stops at whichever comes
+first: `retries` exhausted **or** `maxtime` elapsed. The pause between retries
+defaults to 1000ms (`YAMLTEST_RETRY_INTERVAL_MS`).
 
 ```yaml
 - name: flaky service
-  retries: 5            # retry up to 5 times, 500ms between attempts
+  retries: 5            # retry up to 5 times after the first attempt
   http:
     url: "http://flaky-service"
     method: GET
@@ -411,7 +520,30 @@ expect:
     type: local
   expect:
     statusCode: 200
+
+- name: routing is stable, not just lucky
+  consecutive: 3        # must return the expected provider 3 times in a row
+  retries: 10
+  http: { url: "http://gw", method: POST, path: /failover }
+  source: { type: local }
+  expect:
+    bodyJsonPath:
+      - path: "$.model"
+        comparator: contains
+        value: "gemini"
+
+- name: long browser/OAuth flow
+  timeout: 360000       # one attempt may take up to 6 minutes
+  maxtime: "8m"         # cap the whole retry loop at 8 minutes
+  command: { command: "./run-oauth-flow.sh" }
+  source: { type: local }
+  expect: { exitCode: 0 }
 ```
+
+On failure, the CLI prints the **observed** request/response (or command result)
+from the last attempt inline — no need to re-run under `DEBUG_MODE` to see why a
+test failed. Bodies and outputs are truncated so a large response can't flood the
+log.
 
 ### Multiple tests in one file
 
@@ -429,13 +561,14 @@ Tests run **sequentially** and stop at the first failure (fail-fast).
   expect: { exitCode: 0, stdout: { contains: "Running" } }
 ```
 
-### Environment variables in URL
+### Environment variables in url, headers, and body
 
 ```yaml
 http:
   url: "$API_BASE_URL"          # $VAR or ${VAR}
   headers:
     Authorization: "Bearer ${API_TOKEN}"
+  body: '{"id": "${REQUEST_ID}"}'
 ```
 
 ### setVars — variable passing between steps

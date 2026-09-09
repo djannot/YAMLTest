@@ -301,6 +301,62 @@ describe('validateTestDefinitions – k8s selector apiVersion', () => {
         },
       },
     }], 'apiVersion');
+// ── connectionError expectation ──────────────────────────────────────
+
+describe('validateTestDefinitions – expect.connectionError', () => {
+  const connErr = (connectionError) => [{
+    source: { type: 'local' },
+    http: { url: 'https://example.com' },
+    expect: { connectionError },
+  }];
+
+  it('accepts connectionError: true', () => {
+    expectValid(connErr(true));
+  });
+
+  it('rejects connectionError: false (omit it instead of disabling inline)', () => {
+    expectInvalid(connErr(false));
+  });
+
+  it('accepts connectionError with a code constraint', () => {
+    expectValid(connErr({ code: 'ECONNREFUSED' }));
+  });
+
+  it('accepts connectionError with contains and matches constraints', () => {
+    expectValid(connErr({ contains: 'handshake', matches: 'TLS|SSL' }));
+  });
+
+  it('rejects an empty connectionError object', () => {
+    expectInvalid(connErr({}));
+  });
+
+  it('rejects an unknown key inside connectionError', () => {
+    expectInvalid(connErr({ foo: 'bar' }));
+  });
+
+  it('rejects connectionError combined with statusCode', () => {
+    expectInvalid([{
+      source: { type: 'local' },
+      http: { url: 'https://example.com' },
+      expect: { connectionError: true, statusCode: 200 },
+    }], 'cannot be combined');
+  });
+
+  it('rejects connectionError combined with bodyContains', () => {
+    expectInvalid([{
+      source: { type: 'local' },
+      http: { url: 'https://example.com' },
+      expect: { connectionError: true, bodyContains: 'x' },
+    }], 'cannot be combined');
+  });
+
+  it('rejects connectionError combined with setVars', () => {
+    expectInvalid([{
+      source: { type: 'local' },
+      http: { url: 'https://example.com' },
+      expect: { connectionError: true },
+      setVars: { FOO: { body: true } },
+    }], 'setVars cannot be combined with expect.connectionError');
   });
 });
 
@@ -647,18 +703,18 @@ describe('validateTestDefinitions – edge cases', () => {
     expectInvalid([], 'Validation failed');
   });
 
-  it('accepts HTTP test without expect (no setVars)', () => {
-    expectValid([{
+  it('rejects HTTP test without expect', () => {
+    expectInvalid([{
       source: { type: 'local' },
       http: { url: 'http://x.com' },
-    }]);
+    }], 'expect');
   });
 
-  it('accepts command test without expect (no setVars)', () => {
-    expectValid([{
+  it('rejects command test without expect', () => {
+    expectInvalid([{
       source: { type: 'local' },
       command: { command: 'echo hello' },
-    }]);
+    }], 'expect');
   });
 
   it('accepts empty expect object for HTTP', () => {

@@ -23,7 +23,7 @@ function parseCurlResponse(curlOutput) {
   let bodyStartIndex = -1;
 
   if (lines.length > 0 && lines[0].startsWith('HTTP/')) {
-    const statusMatch = lines[0].match(/HTTP\/\d+\.\d+\s+(\d+)/);
+    const statusMatch = lines[0].match(/HTTP\/\d+(?:\.\d+)?\s+(\d+)/);
     if (statusMatch) {
       statusCode = parseInt(statusMatch[1], 10);
     }

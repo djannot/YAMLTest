@@ -200,6 +200,21 @@ describe('CLI e2e – failing tests', () => {
     expect(r.stdout).toContain('should-fail');
   });
 
+  it('prints the observed request/response on failure (no DEBUG_MODE re-run)', () => {
+    const yaml = JSON.stringify({
+      name: 'observed-http',
+      http: { url: base(), method: 'GET', path: '/health' },
+      source: { type: 'local' },
+      expect: { statusCode: 404 }, // /health returns 200 → fails
+    });
+    const r = runCli(yaml);
+    expect(r.status).toBe(1);
+    expect(r.stdout).toContain('1 failed');
+    // The actual status that caused the failure is surfaced inline.
+    expect(r.stdout).toContain('status 200');
+    expect(r.stdout).toContain('/health');
+  });
+
   it('exits 1 and shows skipped count on fail-fast', () => {
     const yaml = JSON.stringify([
       { name: 'pass',    http: { url: base(), method: 'GET', path: '/health' }, source: { type: 'local' }, expect: { statusCode: 200 } },
@@ -211,6 +226,43 @@ describe('CLI e2e – failing tests', () => {
     expect(r.stdout).toContain('1 passed');
     expect(r.stdout).toContain('1 failed');
     expect(r.stdout).toContain('1 skipped');
+  });
+
+  it('shows the attempt count when a test passes only after retrying', () => {
+    // A command that fails on its first run and passes on the second, driven by
+    // a counter file, so the runner needs exactly one retry to go green.
+    const counter = path.join(os.tmpdir(), `yt-cli-retry-${process.pid}-${Date.now()}`);
+    try { fs.unlinkSync(counter); } catch (_) {}
+    const yaml = JSON.stringify({
+      name: 'passes-after-one-retry',
+      command: { command: `c=$(cat ${counter} 2>/dev/null || echo 0); c=$((c+1)); echo $c > ${counter}; [ $c -ge 2 ]` },
+      source: { type: 'local' },
+      expect: { exitCode: 0 },
+      retries: 3,
+    });
+    const r = runCli(yaml, ['-f', '-'], { YAMLTEST_RETRY_INTERVAL_MS: '0' });
+    try { fs.unlinkSync(counter); } catch (_) {}
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('1 passed');
+    expect(r.stdout).toContain('[2 attempts]'); // passed on the 2nd attempt
+  });
+
+  it('--retries 0 forces a single attempt, overriding the test\'s own retries', () => {
+    // A command that would pass on its 2nd run; with the test's retries:5 it would
+    // normally go green, but --retries 0 forces one attempt so it fails fast.
+    const counter = path.join(os.tmpdir(), `yt-cli-override-${process.pid}-${Date.now()}`);
+    try { fs.unlinkSync(counter); } catch (_) {}
+    const yaml = JSON.stringify({
+      name: 'passes-on-second-run',
+      command: { command: `c=$(cat ${counter} 2>/dev/null || echo 0); c=$((c+1)); echo $c > ${counter}; [ $c -ge 2 ]` },
+      source: { type: 'local' },
+      expect: { exitCode: 0 },
+      retries: 5,
+    });
+    const r = runCli(yaml, ['-f', '-', '--retries', '0']);
+    try { fs.unlinkSync(counter); } catch (_) {}
+    expect(r.status).toBe(1);
+    expect(r.stdout).toContain('1 failed');
   });
 
   it('exits 1 on empty stdin', () => {
@@ -311,6 +363,105 @@ describe('CLI e2e – setVars heredoc expansion', () => {
     } finally {
       fs.unlinkSync(tmpFile);
     }
+  });
+});
+
+// ── --check (schema validation only) ─────────────────────────────────────────
+
+describe('CLI e2e – --check', () => {
+  it('exits 0 and prints "ok" for a valid HTTP test definition', () => {
+    const yaml = JSON.stringify({
+      name: 'valid-http',
+      http: { url: 'https://example.com', method: 'GET', path: '/get' },
+      source: { type: 'local' },
+      expect: { statusCode: 200 },
+    });
+    const r = runCli(yaml, ['--check', '-f', '-']);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('ok');
+  });
+
+  it('exits 0 and prints "ok" for a valid command test definition', () => {
+    const yaml = JSON.stringify({
+      name: 'valid-cmd',
+      command: { command: 'echo hello' },
+      source: { type: 'local' },
+      expect: { exitCode: 0 },
+    });
+    const r = runCli(yaml, ['--check', '-f', '-']);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('ok');
+  });
+
+  it('exits 0 when the YAML contains unresolved ${ENV_VAR} references', () => {
+    const yaml = JSON.stringify({
+      name: 'env-ref',
+      http: { url: 'https://${PROXY_IP}', method: 'GET', path: '/get' },
+      source: { type: 'local' },
+      expect: { statusCode: 200 },
+    });
+    const r = runCli(yaml, ['--check', '-f', '-']);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('ok');
+  });
+
+  it('exits 1 and reports the unknown property for an invalid expect field', () => {
+    const yaml = JSON.stringify({
+      name: 'bad-expect',
+      http: { url: 'https://example.com', method: 'GET', path: '/' },
+      source: { type: 'local' },
+      expect: { status: 200 },   // "status" is not a valid field
+    });
+    const r = runCli(yaml, ['--check', '-f', '-']);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('invalid');
+    expect(r.stderr).toContain('status');
+  });
+
+  it('exits 1 and reports the missing test-type when none is defined', () => {
+    const yaml = JSON.stringify({
+      name: 'no-type',
+      source: { type: 'local' },
+      expect: { statusCode: 200 },
+    });
+    const r = runCli(yaml, ['--check', '-f', '-']);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('invalid');
+  });
+
+  it('exits 1 on multiple tests where one has an invalid schema', () => {
+    const yaml = JSON.stringify([
+      { name: 'ok', http: { url: 'https://example.com', method: 'GET', path: '/' }, source: { type: 'local' }, expect: { statusCode: 200 } },
+      { name: 'bad', http: { url: 'https://example.com', method: 'GET', path: '/' }, source: { type: 'local' }, expect: { status: 200 } },
+    ]);
+    const r = runCli(yaml, ['--check', '-f', '-']);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('bad');
+  });
+
+  it('exits 1 on empty input', () => {
+    const r = runCli('', ['--check', '-f', '-']);
+    expect(r.status).toBe(1);
+  });
+
+  it('exits 1 on invalid YAML syntax', () => {
+    const r = runCli('{ broken: [', ['--check', '-f', '-']);
+    expect(r.status).toBe(1);
+  });
+
+  it('does not execute tests — no HTTP requests are made', () => {
+    // Points at a port that is definitely not listening
+    const yaml = JSON.stringify({
+      name: 'unreachable',
+      http: { url: 'http://127.0.0.1:1', method: 'GET', path: '/' },
+      source: { type: 'local' },
+      expect: { statusCode: 200 },
+    });
+    const r = runCli(yaml, ['--check', '-f', '-']);
+    // Structure is valid → 0, and no connection error in stderr
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('ok');
+    expect(r.stderr).toBe('');
   });
 });
 

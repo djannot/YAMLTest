@@ -81,6 +81,7 @@ const bodyRegexItem = {
       properties: {
         value: { type: 'string' },
         negate: { type: 'boolean' },
+        caseInsensitive: { type: 'boolean' },
       },
       additionalProperties: false,
     },
@@ -96,6 +97,7 @@ const bodyRegexSchema = {
       properties: {
         value: { type: 'string' },
         negate: { type: 'boolean' },
+        caseInsensitive: { type: 'boolean' },
       },
       additionalProperties: false,
     },
@@ -227,6 +229,26 @@ const httpConfigSchema = {
 
 // ── HTTP expect ──────────────────────────────────────────────────────
 
+// connectionError asserts the request fails at the transport level (DNS, TCP,
+// or TLS) before any HTTP response is received. `true` accepts any connection
+// failure; the object form additionally constrains the error's code/message.
+const connectionErrorSchema = {
+  oneOf: [
+    { const: true },   // `false` is rejected — omit connectionError instead of disabling it inline
+    {
+      type: 'object',
+      properties: {
+        code: { type: 'string' },      // e.g. "ECONNREFUSED", "CERT_HAS_EXPIRED"
+        contains: { type: 'string' },  // substring of the error message
+        matches: { type: 'string' },   // regex against the error message
+      },
+      minProperties: 1,
+      additionalProperties: false,
+    },
+  ],
+  errorMessage: 'connectionError must be `true`, or an object with at least one of: code, contains, matches',
+};
+
 const httpExpectSchema = {
   type: 'object',
   properties: {
@@ -249,8 +271,26 @@ const httpExpectSchema = {
       items: headerExpectationItem,
       minItems: 1,
     },
+    connectionError: connectionErrorSchema,
   },
   additionalProperties: false,
+  // A failed connection yields no response, so connectionError cannot be
+  // combined with any response-based expectation.
+  if: { required: ['connectionError'] },
+  then: {
+    not: {
+      anyOf: [
+        { required: ['statusCode'] },
+        { required: ['body'] },
+        { required: ['bodyContains'] },
+        { required: ['bodyRegex'] },
+        { required: ['bodyJsonPath'] },
+        { required: ['headers'] },
+      ],
+    },
+    errorMessage:
+      'expect.connectionError cannot be combined with response-based expectations (statusCode, body, bodyContains, bodyRegex, bodyJsonPath, headers)',
+  },
 };
 
 // ── HTTP setVars ─────────────────────────────────────────────────────
@@ -288,6 +328,7 @@ const commandConfigSchema = {
   properties: {
     command: { type: 'string' },
     parseJson: { type: 'boolean' },
+    echo: { type: 'boolean' },
     env: {
       type: 'object',
       additionalProperties: { type: 'string' },
@@ -425,7 +466,11 @@ const testDefinitionSchema = {
   required: [],
   properties: {
     name: { type: 'string' },
+    test_title: { type: 'string' },
     retries: { type: 'integer', minimum: 0 },
+    consecutive: { type: 'integer', minimum: 1 },
+    timeout: { type: 'integer', minimum: 0 },
+    maxtime: { oneOf: [{ type: 'integer', minimum: 0 }, { type: 'string' }] },
     source: sourceSchema,
     http: httpConfigSchema,
     command: commandConfigSchema,
@@ -459,18 +504,41 @@ const testDefinitionSchema = {
     {
       if: { required: ['http'] },
       then: {
-        required: ['source'],
+        required: ['source', 'expect'],
         properties: {
           expect: httpExpectSchema,
           setVars: httpSetVarsSchema,
         },
       },
     },
+    // HTTP: url is required unless source is a local Service (auto-discovery)
+    {
+      if: { required: ['http'] },
+      then: {
+        anyOf: [
+          { type: 'object', properties: { http: { type: 'object', required: ['url'] } } },
+          {
+            type: 'object',
+            properties: {
+              source: {
+                type: 'object',
+                properties: {
+                  type: { const: 'local' },
+                  selector: { type: 'object', properties: { kind: { const: 'Service' } }, required: ['kind'] },
+                },
+                required: ['type', 'selector'],
+              },
+            },
+          },
+        ],
+        errorMessage: 'http.url is required (or use source.selector.kind: Service for auto-discovery)',
+      },
+    },
     // Command: validate expect and setVars shapes
     {
       if: { required: ['command'] },
       then: {
-        required: ['source'],
+        required: ['source', 'expect'],
         properties: {
           expect: commandExpectSchema,
           setVars: commandSetVarsSchema,
@@ -504,6 +572,19 @@ const testDefinitionSchema = {
         required: ['expect'],
       },
     },
+    // setVars cannot be combined with expect.connectionError: a failed
+    // connection yields no response to extract variables from, and the test
+    // short-circuits before setVars is applied.
+    {
+      if: {
+        required: ['setVars', 'expect'],
+        properties: { expect: { type: 'object', required: ['connectionError'] } },
+      },
+      then: {
+        not: { required: ['setVars'] },
+        errorMessage: 'setVars cannot be combined with expect.connectionError (a failed connection has no response to extract variables from)',
+      },
+    },
   ],
   additionalProperties: true,
 };
@@ -534,9 +615,24 @@ function formatValidationErrors(errors, definitions) {
   const seen = new Set();
   const meaningful = [];
 
+  // Collect instance paths that have a custom errorMessage so we can suppress
+  // the raw sub-errors from their anyOf branches (they are noise).
+  const errorMessagePaths = errors
+    .filter(e => e.keyword === 'errorMessage')
+    .map(e => e.instancePath);
+
+  // Returns true when a custom errorMessage covers this instancePath (exact or ancestor).
+  const coveredByErrorMessage = (instancePath) =>
+    errorMessagePaths.some(p => instancePath === p || instancePath.startsWith(p + '/'));
+
   for (const err of errors) {
     // Skip generic wrapper messages that aren't actionable
     if (err.keyword === 'if' || err.keyword === 'ifThen') continue;
+
+    // Skip raw sub-errors that originate inside an anyOf branch when a custom
+    // errorMessage already covers the same instance path — the errorMessage is
+    // the actionable line; the branch sub-errors are misleading noise.
+    if (err.schemaPath.includes('/anyOf/') && coveredByErrorMessage(err.instancePath)) continue;
 
     const key = `${err.instancePath}|${err.keyword}|${err.message}`;
     if (seen.has(key)) continue;
