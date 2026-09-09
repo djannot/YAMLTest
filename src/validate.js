@@ -391,7 +391,21 @@ const waitConfigSchema = {
   required: ['target'],
   properties: {
     target: k8sSelector,
-    jsonPath: { type: 'string' },
+    // Two accepted forms:
+    //   string – a single path, compared against `jsonPathExpectation`
+    //   array  – several self-contained assertions ({path, comparator, value,
+    //            negate}), all of which must pass on the same poll attempt
+    // The item shape is asserted separately (see allOf below) so a malformed
+    // entry reports "missing required property comparator" rather than a
+    // useless "must be string / must match exactly one schema in oneOf" pair.
+    jsonPath: {
+      oneOf: [
+        { type: 'string' },
+        { type: 'array', minItems: 1 },
+      ],
+      errorMessage:
+        'wait.jsonPath must be a string (a single path, compared against jsonPathExpectation) or a non-empty array of {path, comparator, value, negate} assertions',
+    },
     jsonPathExpectation: {
       type: 'object',
       required: ['comparator'],
@@ -412,6 +426,24 @@ const waitConfigSchema = {
       additionalProperties: false,
     },
   },
+  // The array form carries its own comparator per entry, which would silently
+  // supersede a top-level jsonPathExpectation. Reject the combination instead.
+  allOf: [
+    {
+      if: {
+        required: ['jsonPath'],
+        properties: { jsonPath: { type: 'array' } },
+      },
+      then: {
+        properties: {
+          jsonPath: { type: 'array', items: jsonPathExpectationItem },
+        },
+        not: { required: ['jsonPathExpectation'] },
+        errorMessage:
+          'wait.jsonPathExpectation cannot be combined with the array form of wait.jsonPath (each array entry carries its own comparator/value)',
+      },
+    },
+  ],
   additionalProperties: false,
 };
 
@@ -552,6 +584,26 @@ const testDefinitionSchema = {
           setVars: waitSetVarsSchema,
         },
         not: { required: ['expect'] },
+      },
+    },
+    // Wait + setVars: the captured value comes from the single jsonPath, so the
+    // array form (several paths, no designated one) has nothing unambiguous to
+    // capture. Require the string form rather than silently picking entry [0].
+    {
+      if: {
+        required: ['wait', 'setVars'],
+        properties: {
+          wait: {
+            type: 'object',
+            required: ['jsonPath'],
+            properties: { jsonPath: { type: 'array' } },
+          },
+        },
+      },
+      then: {
+        not: { required: ['setVars'] },
+        errorMessage:
+          'setVars requires the string form of wait.jsonPath (the array form asserts several paths, so the value to capture is ambiguous)',
       },
     },
     // HTTP body comparison: no expect, no setVars
