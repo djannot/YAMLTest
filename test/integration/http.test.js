@@ -225,6 +225,50 @@ describe('HTTP integration – query params', () => {
   });
 });
 
+describe('HTTP integration – path env var substitution', () => {
+  it('substitutes env vars in the path', async () => {
+    process.env.YT_TEST_PATH_SEGMENT = 'health';
+    try {
+      await expect(
+        executeTest(
+          yaml({
+            http: {
+              url: baseUrl,
+              method: 'GET',
+              path: '/${YT_TEST_PATH_SEGMENT}',
+            },
+            source: { type: 'local' },
+            expect: { statusCode: 200, bodyContains: 'healthy' },
+          })
+        )
+      ).resolves.toBe(true);
+    } finally {
+      delete process.env.YT_TEST_PATH_SEGMENT;
+    }
+  });
+
+  it('substitutes env vars in a path suffix appended to a resource name', async () => {
+    process.env.YT_RUN_SUFFIX = '/200';
+    try {
+      await expect(
+        executeTest(
+          yaml({
+            http: {
+              url: baseUrl,
+              method: 'GET',
+              path: '/status${YT_RUN_SUFFIX}',
+            },
+            source: { type: 'local' },
+            expect: { statusCode: 200 },
+          })
+        )
+      ).resolves.toBe(true);
+    } finally {
+      delete process.env.YT_RUN_SUFFIX;
+    }
+  });
+});
+
 describe('HTTP integration – header validation', () => {
   it('validates a response header value', async () => {
     await expect(

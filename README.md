@@ -249,14 +249,17 @@ Notes:
 
 #### Environment variable substitution
 
-Any `$VAR` or `${VAR}` in the `url`, `headers`, or `body` fields is resolved from the environment:
+Any `$VAR` or `${VAR}` in the `url`, `path`, `headers`, `body`, or `params` fields is resolved from the environment:
 
 ```yaml
 http:
   url: "${API_BASE_URL}"
+  path: /v0/agents/my-agent${RUN_SUFFIX}
   headers:
     Authorization: "Bearer ${API_TOKEN}"
   body: '{"id": "${REQUEST_ID}"}'
+  params:
+    apiKey: "${API_KEY}"
 ```
 
 #### Pod-based HTTP test
@@ -613,14 +616,17 @@ Tests run **sequentially** and stop at the first failure (fail-fast).
   expect: { exitCode: 0, stdout: { contains: "Running" } }
 ```
 
-### Environment variables in url, headers, and body
+### Environment variables in url, path, headers, body, and params
 
 ```yaml
 http:
   url: "$API_BASE_URL"          # $VAR or ${VAR}
+  path: /v0/agents/my-agent${RUN_SUFFIX}
   headers:
     Authorization: "Bearer ${API_TOKEN}"
   body: '{"id": "${REQUEST_ID}"}'
+  params:
+    apiKey: "${API_KEY}"
 ```
 
 ### setVars — variable passing between steps
