@@ -618,6 +618,123 @@ describe('validateTestDefinitions – conditional requirements', () => {
   });
 });
 
+// ── Wait: array form of jsonPath ─────────────────────────────────────
+
+describe('validateTestDefinitions – wait jsonPath array form', () => {
+  const target = {
+    kind: 'ConfigMap',
+    metadata: { namespace: 'ns', name: 'cm' },
+  };
+
+  it('accepts an array of jsonPath assertions', () => {
+    expectValid([{
+      name: 'multi-assert',
+      wait: {
+        target,
+        jsonPath: [
+          { path: "$.data['token-exchange-validators.yaml']", comparator: 'contains', value: 'subjectValidators:' },
+          { path: "$.data['token-exchange-validators.yaml']", comparator: 'contains', value: 'actorValidators:' },
+        ],
+        polling: { timeoutSeconds: 60, intervalSeconds: 2 },
+      },
+    }]);
+  });
+
+  it('accepts every comparator and negate in the array form', () => {
+    expectValid([{
+      wait: {
+        target,
+        jsonPath: [
+          { path: '$.spec.replicas', comparator: 'greaterThan', value: 0 },
+          { path: '$.spec.replicas', comparator: 'lessThan', value: 10 },
+          { path: '$.status.phase', comparator: 'equals', value: 'Running' },
+          { path: '$.status.phase', comparator: 'matches', value: '^Run' },
+          { path: '$.status.phase', comparator: 'exists' },
+          { path: '$.status.reason', comparator: 'contains', value: 'Evicted', negate: true },
+        ],
+      },
+    }]);
+  });
+
+  it('accepts bracket-notation and filter-expression paths', () => {
+    expectValid([{
+      wait: {
+        target,
+        jsonPath: [
+          { path: "$.data['a.b.yaml']", comparator: 'contains', value: 'x' },
+          { path: '$.spec.template.spec.containers[0].env[?(@.name=="X")].value', comparator: 'equals', value: 'v' },
+        ],
+      },
+    }]);
+  });
+
+  it('still accepts the string form paired with jsonPathExpectation', () => {
+    expectValid([{
+      wait: {
+        target,
+        jsonPath: '$.status.readyReplicas',
+        jsonPathExpectation: { comparator: 'greaterThan', value: 0 },
+      },
+    }]);
+  });
+
+  it('rejects the array form combined with jsonPathExpectation', () => {
+    expectInvalid(
+      [{
+        wait: {
+          target,
+          jsonPath: [{ path: '$.a', comparator: 'exists' }],
+          jsonPathExpectation: { comparator: 'equals', value: 1 },
+        },
+      }],
+      'jsonPathExpectation cannot be combined',
+    );
+  });
+
+  it('rejects setVars combined with the array form', () => {
+    expectInvalid(
+      [{
+        wait: {
+          target,
+          jsonPath: [{ path: '$.a', comparator: 'exists' }],
+        },
+        setVars: { X: { value: true } },
+      }],
+      'setVars requires the string form',
+    );
+  });
+
+  it('rejects an empty jsonPath array', () => {
+    expectInvalid([{ wait: { target, jsonPath: [] } }], 'wait.jsonPath must be a string');
+  });
+
+  it('rejects an array entry missing comparator', () => {
+    expectInvalid([{ wait: { target, jsonPath: [{ path: '$.a' }] } }], 'comparator');
+  });
+
+  it('rejects an array entry missing path', () => {
+    expectInvalid([{ wait: { target, jsonPath: [{ comparator: 'exists' }] } }], 'path');
+  });
+
+  it('rejects an unknown property in an array entry', () => {
+    expectInvalid(
+      [{ wait: { target, jsonPath: [{ path: '$.a', comparator: 'exists', expected: 1 }] } }],
+      'expected',
+    );
+  });
+
+  it('rejects an unknown comparator in an array entry', () => {
+    expectInvalid(
+      [{ wait: { target, jsonPath: [{ path: '$.a', comparator: 'nope' }] } }],
+      'comparator',
+    );
+  });
+
+  it('rejects a jsonPath that is neither string nor array', () => {
+    expectInvalid([{ wait: { target, jsonPath: 42 } }], 'wait.jsonPath must be a string');
+  });
+});
+
 // ── Additional properties (typo detection) ───────────────────────────
 
 describe('validateTestDefinitions – unknown properties', () => {
