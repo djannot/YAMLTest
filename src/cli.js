@@ -51,6 +51,8 @@ function parseArgs(argv) {
       opts.retries = parseInt(args[i].slice('--retries='.length), 10);
     } else if (args[i] === '--help' || args[i] === '-h') {
       opts.help = true;
+    } else if (args[i] === '--version' || args[i] === '-v') {
+      opts.version = true;
     } else if (args[i] === '--check') {
       opts.check = true;
     }
@@ -86,6 +88,7 @@ function printUsage() {
       '                        per-test `retries` and the default. Use --retries 0 to',
       '                        run once when debugging a failure.',
       '  --check               Validate YAML structure only; do not run tests',
+      '  -v, --version         Show the version number',
       '  -h, --help            Show this help',
       '',
       c.bold('ENVIRONMENT'),
@@ -216,6 +219,11 @@ function printResults(result) {
 async function main() {
   const opts = parseArgs(process.argv);
 
+  if (opts.version) {
+    process.stdout.write(require('../package.json').version + '\n');
+    process.exit(0);
+  }
+
   if (opts.help) {
     printUsage();
     process.exit(0);
@@ -238,7 +246,7 @@ async function main() {
   }
 
   if (!yamlContent || !yamlContent.trim()) {
-    process.stderr.write(c.red('Error: ') + 'Empty input – no YAML content to run.\n');
+    process.stderr.write(c.red('Error: ') + 'Empty input - no YAML content to run.\n');
     process.exit(1);
   }
 

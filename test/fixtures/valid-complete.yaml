@@ -151,6 +151,7 @@
   wait:
     target:
       kind: Deployment
+      apiVersion: apps/v1
       context: my-cluster
       metadata:
         namespace: default

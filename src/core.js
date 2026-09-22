@@ -100,8 +100,16 @@ function validateConnectionError(error, spec, testName) {
  * @returns {object} - Object containing command argument parts
  */
 const buildSelectorArgs = (selector) => {
-  // Determine the resource kind
-  const kindArg = selector.kind.toLowerCase();
+  // Determine the resource kind, optionally qualified with API group
+  let kindArg = selector.kind.toLowerCase();
+  if (selector.apiVersion) {
+    const parts = selector.apiVersion.split('/');
+    if (parts.length === 2) {
+      // e.g. "apps/v1" → qualify as "deployments.apps" to disambiguate
+      kindArg = `${kindArg}.${parts[0]}`;
+    }
+    // core group (e.g. "v1") needs no qualification
+  }
 
   // Add namespace if specified
   const namespaceArg = selector.metadata.namespace ? `-n ${selector.metadata.namespace}` : '';
@@ -682,6 +690,10 @@ async function executeHttpTest(test) {
   }
 
   test.http.url = resolveEnvVarsInUrl(test.http.url);// Resolve environment variables in URL
+  // Resolve environment variables in the path (consistent with url/headers/body/params)
+  if (typeof test.http.path === 'string') {
+    test.http.path = resolveEnvVarsInString(test.http.path);
+  }
   test.http.method = test.http.method || 'GET';
 
   // If the url contains a path component (beyond '/'), extract it and prepend it to the explicit
@@ -1776,6 +1788,20 @@ function getResourceDescription(selector) {
 }
 
 /**
+ * Renders a wait expectation as an operator + value phrase, e.g. `equals "Running"`
+ * or `not contains "x"`, for log and error output.
+ * @param {object} expectation - { comparator, value, negate }
+ * @returns {string} - The rendered phrase
+ */
+function describeWaitExpectation(expectation) {
+  const op = expectation.negate ? `not ${expectation.comparator}` : expectation.comparator;
+  const valueStr = expectation.comparator !== 'exists'
+    ? ` ${JSON.stringify(expectation.value)}`
+    : '';
+  return `${op}${valueStr}`;
+}
+
+/**
  * Waits for a Kubernetes resource to match a condition - throws on failure/timeout
  * @param {object} config - Configuration for the wait operation
  * @returns {Promise<void>} - Promise that resolves when the condition is met or rejects with an error
@@ -1785,11 +1811,29 @@ async function executeKubectlWait(config, setVars) {
 
   const { target, jsonPath, jsonPathExpectation, polling } = config;
 
-  // Validate setVars for wait: value extraction requires jsonPath
+  // `jsonPath` accepts two forms:
+  //   string – one path, compared against the separate `jsonPathExpectation`
+  //   array  – several self-contained assertions ({path, comparator, value,
+  //            negate}), all of which must pass on the same poll attempt
+  const multiPath = Array.isArray(jsonPath);
+
+  // Normalised to { path, expectation } so both forms share one evaluation loop.
+  let assertions = [];
+  if (multiPath) {
+    assertions = jsonPath.map(entry => ({ path: entry.path, expectation: entry }));
+  } else if (jsonPath) {
+    assertions = [{ path: jsonPath, expectation: jsonPathExpectation || null }];
+  }
+
+  // Validate setVars for wait: value extraction requires a single jsonPath
   if (setVars) {
     for (const [varName, rule] of Object.entries(setVars)) {
-      if (rule.value === true && !jsonPath) {
+      if (rule.value !== true) continue;
+      if (!jsonPath) {
         throw new Error(`setVars "${varName}": "value" extraction requires "jsonPath" to be defined in the wait config`);
+      }
+      if (multiPath) {
+        throw new Error(`setVars "${varName}": "value" extraction requires the string form of "jsonPath" (the array form asserts several paths, so the value to capture is ambiguous)`);
       }
     }
   }
@@ -1805,25 +1849,21 @@ async function executeKubectlWait(config, setVars) {
   // Get a human-readable description of the resource
   const resourceDescription = getResourceDescription(target);
 
-  // Log what we're waiting for
-  if (jsonPathExpectation) {
-    const compareStr = jsonPathExpectation.negate
-      ? `not ${jsonPathExpectation.comparator}`
-      : jsonPathExpectation.comparator;
-    const valueStr = jsonPathExpectation.comparator !== 'exists'
-      ? ` ${JSON.stringify(jsonPathExpectation.value)}`
-      : '';
-
-    // Include retry info in log message if specified
-    const retryInfo = maxRetries !== undefined ? ` (max ${maxRetries} retries)` : '';
-    console.info(`Waiting for ${resourceDescription} until ${jsonPath} ${compareStr}${valueStr}${retryInfo}`);
+  // Log what we're waiting for — one line per test, however many assertions
+  // it carries.
+  const retryInfo = maxRetries !== undefined ? ` (max ${maxRetries} retries)` : '';
+  if (assertions.some(a => a.expectation)) {
+    const summary = assertions
+      .map(a => (a.expectation ? `${a.path} ${describeWaitExpectation(a.expectation)}` : a.path))
+      .join(' AND ');
+    console.info(`Waiting for ${resourceDescription} until ${summary}${retryInfo}`);
   } else {
-    const retryInfo = maxRetries !== undefined ? ` (max ${maxRetries} retries)` : '';
     console.info(`Waiting for ${resourceDescription}${retryInfo}`);
   }
 
   const deadline = Date.now() + timeout * 1000;
   let retryCount = 0;
+  let lastFailure = null;
 
   while (Date.now() < deadline) {
     // Check if we've exceeded max retries
@@ -1854,50 +1894,59 @@ async function executeKubectlWait(config, setVars) {
         continue;
       }
 
-      // Only extract the value if jsonPath is provided
-      if (jsonPath) {
-        let matches = JSONPath({ path: jsonPath, json: json });
-        if (!matches.length) {
-          matches = JSONPath({ path: `$${jsonPath}`, json: json }); // this will allow jq-style jsonPath
+      // Only extract values if jsonPath is provided. Every assertion is
+      // evaluated against this single read; the attempt succeeds only when all
+      // of them pass, and the first failure sends us to the next poll.
+      if (assertions.length) {
+        let failure = null;
+        let extractedValue;
+
+        for (const assertion of assertions) {
+          let matches = JSONPath({ path: assertion.path, json: json });
+          if (!matches.length) {
+            matches = JSONPath({ path: `$${assertion.path}`, json: json }); // this will allow jq-style jsonPath
+          }
+          if (!matches.length || matches[0] === null || matches[0] === undefined) {
+            failure = `jsonPath ${assertion.path} not found yet`;
+            break;
+          }
+
+          extractedValue = matches[0];
+
+          // Check against expected conditions if provided
+          if (assertion.expectation) {
+            try {
+              // Use the compare value function (which now throws on failure)
+              compareValue(
+                extractedValue,
+                assertion.expectation,
+                `JSONPath ${assertion.path}`
+              );
+
+              debugLog(`Value meets expectation: ${JSON.stringify(extractedValue)}`);
+            } catch (comparisonError) {
+              failure = comparisonError.message;
+              break;
+            }
+          } else if (extractedValue === '') {
+            // No expectation - just checking if the value exists and is not empty
+            failure = `Value for ${assertion.path} is empty string`;
+            break;
+          } else {
+            debugLog(`Found value for ${assertion.path}: ${typeof extractedValue === 'string' ? extractedValue : JSON.stringify(extractedValue)}`);
+          }
         }
-        if (!matches.length || matches[0] === null || matches[0] === undefined) {
-          debugLog(`Attempt ${retryCount + 1}${maxRetries !== undefined ? `/${maxRetries}` : ''}: jsonPath ${jsonPath} not found yet, retrying…`);
+
+        if (failure) {
+          lastFailure = failure;
+          debugLog(`Attempt ${retryCount + 1}${maxRetries !== undefined ? `/${maxRetries}` : ''}: ${failure}, retrying...`);
           retryCount++;
           await sleep(interval * 1000);
           continue;
         }
 
-        const extractedValue = matches[0];
-
-        // Check against expected conditions if provided
-        if (jsonPathExpectation) {
-          try {
-            // Use the compare value function (which now throws on failure)
-            compareValue(
-              extractedValue,
-              jsonPathExpectation,
-              `JSONPath ${jsonPath}`
-            );
-
-            debugLog(`Value meets expectation: ${JSON.stringify(extractedValue)}`);
-          } catch (comparisonError) {
-            debugLog(`Attempt ${retryCount + 1}${maxRetries !== undefined ? `/${maxRetries}` : ''}: ${comparisonError.message}, retrying...`);
-            retryCount++;
-            await sleep(interval * 1000);
-            continue;
-          }
-        } else {
-          // No expectation - just checking if the value exists and is not empty
-          if (extractedValue === '') {
-            debugLog(`Attempt ${retryCount + 1}${maxRetries !== undefined ? `/${maxRetries}` : ''}: Value is empty string, retrying...`);
-            retryCount++;
-            await sleep(interval * 1000);
-            continue;
-          }
-          debugLog(`Found value for ${jsonPath}: ${typeof extractedValue === 'string' ? extractedValue : JSON.stringify(extractedValue)}`);
-        }
-
-        // Apply setVars if provided
+        // Apply setVars if provided. Only reachable for the string form —
+        // "value" extraction against the array form is rejected up front.
         if (setVars) {
           applySetVars(setVars, { extractedValue }, 'wait');
         }
@@ -1916,14 +1965,14 @@ async function executeKubectlWait(config, setVars) {
 
   // Format a helpful error message for timeout
   let errorMessage = `Timed-out (${timeout}s) waiting for ${resourceDescription}`;
-  if (jsonPath) {
-    errorMessage += ` → ${jsonPath}`;
-    if (jsonPathExpectation) {
-      const op = jsonPathExpectation.negate ? `not ${jsonPathExpectation.comparator}` : jsonPathExpectation.comparator;
-      const valueStr = jsonPathExpectation.comparator !== 'exists'
-        ? ` ${JSON.stringify(jsonPathExpectation.value)}`
-        : '';
-      errorMessage += ` to ${op}${valueStr}`;
+  if (assertions.length) {
+    errorMessage += ` → ${assertions
+      .map(a => (a.expectation ? `${a.path} to ${describeWaitExpectation(a.expectation)}` : a.path))
+      .join(' AND ')}`;
+    // Name the assertion that actually blocked us — with several paths in play
+    // the list above alone doesn't say which one never settled.
+    if (lastFailure) {
+      errorMessage += ` (last failure: ${lastFailure})`;
     }
   }
 
@@ -1980,6 +2029,20 @@ async function executeCommandTest(test) {
     } else if (test.source.type === 'pod') {
       if (!test.source.selector) {
         throw new Error('Kubernetes selector is required for pod-based command tests');
+      }
+
+      // Live echo is only implemented for the local executor. On the pod path
+      // the command runs via `kubectl exec` and its output is buffered until the
+      // command completes.
+      //
+      // NOTE: In order to minimize noise, the YAMLTEST_ECHO will not have any effect here.
+      // Warning will happen only when a pod test *explicitly* opts in with `echo: true`.
+      if (commandConfig.echo === true) {
+        const label = test.name || test.test_title;
+        console.warn(
+          `Warning: echo is not supported for pod command tests (source.type: pod)` +
+          `${label ? ` in "${label}"` : ''}; output will only be shown after the command completes.`
+        );
       }
 
       debugLog(`Using kubectl exec to run command in pod ${JSON.stringify(test.source.selector)}`);
@@ -2049,6 +2112,14 @@ async function executeLocalCommand(commandConfig) {
 
   debugLog(`Executing shell command (via ${scriptPath}): ${commandConfig.command}`);
 
+  // When enabled, tee the child's stdout/stderr: every chunk is still captured
+  // into the strings below (assertions and the `observed` failure snapshot depend
+  // on that, always), AND simultaneously echoed to our own stdout/stderr as it
+  // arrives so long-running tests show progress live instead of going silent
+  // until they finish. Enable per-test with `command.echo: true` or globally with
+  // YAMLTEST_ECHO=true.
+  const echo = process.env.YAMLTEST_ECHO === 'true' || commandConfig.echo === true;
+
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, {
       env,
@@ -2061,10 +2132,12 @@ async function executeLocalCommand(commandConfig) {
 
     child.stdout.on('data', (data) => {
       stdout += data.toString();
+      if (echo) process.stdout.write(data);
     });
 
     child.stderr.on('data', (data) => {
       stderr += data.toString();
+      if (echo) process.stderr.write(data);
     });
 
     child.on('close', (exitCode) => {
@@ -2077,7 +2150,7 @@ async function executeLocalCommand(commandConfig) {
         stdout: stdout.trim(),
         stderr: stderr.trim(),
         exitCode,
-        output: stdout.trim() // alias for backwards compatibility
+        output: stdout.trim(), // alias for backwards compatibility
       };
 
       // Parse JSON if requested and stdout is not empty
@@ -2511,8 +2584,11 @@ async function executeHttpRequestInternal(requestConfig) {
     throw new Error('HTTP configuration missing in request config');
   }
 
-  // Resolve environment variables in URL
+  // Resolve environment variables in URL and path
   requestConfig.http.url = resolveEnvVarsInUrl(requestConfig.http.url);
+  if (typeof requestConfig.http.path === 'string') {
+    requestConfig.http.path = resolveEnvVarsInString(requestConfig.http.path);
+  }
 
   // Resolve environment variables in headers and body
   if (requestConfig.http.headers && typeof requestConfig.http.headers === 'object') {

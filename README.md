@@ -79,6 +79,7 @@ OPTIONS
 
 ENVIRONMENT
   DEBUG_MODE=true       Enable verbose debug logging
+  YAMLTEST_ECHO=true    Echo every local command's output live as it runs
   NO_COLOR=1            Disable ANSI colour output
 ```
 
@@ -248,14 +249,17 @@ Notes:
 
 #### Environment variable substitution
 
-Any `$VAR` or `${VAR}` in the `url`, `headers`, or `body` fields is resolved from the environment:
+Any `$VAR` or `${VAR}` in the `url`, `path`, `headers`, `body`, or `params` fields is resolved from the environment:
 
 ```yaml
 http:
   url: "${API_BASE_URL}"
+  path: /v0/agents/my-agent${RUN_SUFFIX}
   headers:
     Authorization: "Bearer ${API_TOKEN}"
   body: '{"id": "${REQUEST_ID}"}'
+  params:
+    apiKey: "${API_KEY}"
 ```
 
 #### Pod-based HTTP test
@@ -310,6 +314,7 @@ Run any shell command and validate its output.
   command:
     command: "kubectl version -short"
     parseJson: false              # parse stdout as JSON (default: false)
+    echo: true                    # echo the command's output live (default: false)
     env:
       MY_VAR: value               # extra environment variables
     workingDir: /tmp              # working directory
@@ -322,6 +327,29 @@ Run any shell command and validate its output.
     stderr:
       contains: ""
 ```
+
+#### Echoing output for long-running commands
+
+By default a command's stdout/stderr is captured silently and only shown at the
+end (and only for failing tests). For a long-running command — a browser flow, a
+multi-minute integration script — that means a blank screen until it finishes. Set
+`echo: true` to tee the command's output to your terminal **as it is produced**,
+while still capturing it for the assertions:
+
+```yaml
+- name: long oauth flow
+  command:
+    command: "./run-oauth-flow.sh"
+    echo: true
+  source:
+    type: local
+  expect:
+    exitCode: 0
+```
+
+Set it globally instead of per-test with the `YAMLTEST_ECHO=true` environment
+variable. Echoing applies to `source.type: local` commands. Because the live
+output interleaves with the `✓`/`✗` summary, it is off by default.
 
 Multiple stdout expectations (all must pass):
 
@@ -360,6 +388,7 @@ Poll a Kubernetes resource until a condition is met (or timeout).
   wait:
     target:
       kind: Deployment
+      apiVersion: apps/v1        # optional
       metadata:
         namespace: default
         name: my-app
@@ -385,6 +414,7 @@ Selector by labels:
 wait:
   target:
     kind: Pod
+    apiVersion: v1               # optional
     metadata:
       namespace: production
       labels:
@@ -395,6 +425,58 @@ wait:
     comparator: equals
     value: Running
 ```
+
+#### Asserting several paths
+
+`jsonPath` also accepts an **array** of self-contained assertions — the same
+`{path, comparator, value, negate}` shape that `command` and `http` tests use —
+so one `wait` can check several fields of the same resource instead of falling
+back to a `command` shim or repeating the whole block:
+
+```yaml
+- name: validators are delivered via the config ConfigMap
+  wait:
+    target:
+      kind: ConfigMap
+      metadata:
+        name: agentgateway-config
+        namespace: agentgateway-system
+    jsonPath:
+      - path: "$.data['token-exchange-validators.yaml']"
+        comparator: contains
+        value: "subjectValidators:"
+      - path: "$.data['token-exchange-validators.yaml']"
+        comparator: contains
+        value: "actorValidators:"
+      - path: '$.spec.template.spec.containers[0].env[?(@.name=="LOG_LEVEL")].value'
+        comparator: equals
+        value: debug
+    polling:
+      timeoutSeconds: 60
+      intervalSeconds: 2
+```
+
+Semantics: **one** `kubectl get ... -o json` per poll attempt, and an attempt
+succeeds only when **every** entry passes. Any failure — including a path that
+is not present yet — retries until `polling.timeoutSeconds`. This matches how
+`command` and `http` treat their jsonPath arrays, and the run output still shows
+one block per test rather than one per entry. On timeout the error names the
+assertion that blocked:
+
+```
+Timed-out (60s) waiting for ConfigMap/agentgateway-system/agentgateway-config
+  → $.a to contains "x" AND $.b to equals "y"
+  (last failure: JSONPath $.b comparison failed: expected to equals "y", found z)
+```
+
+Two rules keep the forms unambiguous, both enforced by schema validation:
+
+| Combination | Result |
+| --- | --- |
+| `jsonPath` string + `jsonPathExpectation` | supported (the original form) |
+| `jsonPath` array (each entry carries its own comparator) | supported |
+| `jsonPath` array + `jsonPathExpectation` | **rejected** — the per-entry comparator would silently supersede it |
+| `jsonPath` array + `setVars` | **rejected** — with several paths there is no unambiguous value to capture; use the string form |
 
 ---
 
@@ -534,14 +616,17 @@ Tests run **sequentially** and stop at the first failure (fail-fast).
   expect: { exitCode: 0, stdout: { contains: "Running" } }
 ```
 
-### Environment variables in url, headers, and body
+### Environment variables in url, path, headers, body, and params
 
 ```yaml
 http:
   url: "$API_BASE_URL"          # $VAR or ${VAR}
+  path: /v0/agents/my-agent${RUN_SUFFIX}
   headers:
     Authorization: "Bearer ${API_TOKEN}"
   body: '{"id": "${REQUEST_ID}"}'
+  params:
+    apiKey: "${API_KEY}"
 ```
 
 ### setVars — variable passing between steps
@@ -621,6 +706,10 @@ Extract values from a test response and store them for use in subsequent steps v
     READY_REPLICAS:
       value: true                  # capture the jsonPath-extracted value
 ```
+
+`value: true` requires the **string** form of `jsonPath`. The array form asserts
+several paths at once, so there is no single value to capture — see
+[Asserting several paths](#asserting-several-paths).
 
 #### Chaining example: login then access protected endpoint
 

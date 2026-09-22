@@ -1,0 +1,34 @@
+# Dependencies
+node_modules/
+
+# Test coverage — vitest.config.js uses the default ./coverage directory
+# with the lcov + html reporters.
+coverage/
+*.lcov
+
+# Package tarballs from `npm pack` / `npm publish --dry-run`
+*.tgz
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+logs/
+*.log
+
+# Local environment overrides. YAMLTest reads config from the environment
+# (YAMLTEST_*, plus any vars a test's setVars writes), so keep these local.
+.env
+.env.*
+!.env.example
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

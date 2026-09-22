@@ -247,6 +247,44 @@ describe('kubectl wait', () => {
       },
     }))).rejects.toThrow(/[Mm]aximum retries/);
   });
+
+  it('asserts several jsonPath entries against one resource', async () => {
+    await expect(executeTest(yaml({
+      wait: {
+        target: {
+          kind: 'Pod',
+          metadata: { namespace: NS, name: POD },
+          context: CONTEXT,
+        },
+        jsonPath: [
+          { path: '$.status.phase', comparator: 'equals', value: 'Running' },
+          { path: '$.status.containerStatuses[0].ready', comparator: 'equals', value: true },
+          { path: '$.metadata.name', comparator: 'contains', value: 'nginx' },
+          { path: `$.metadata.labels['${LABEL_KEY}']`, comparator: 'equals', value: LABEL_VAL },
+          { path: '$.spec.containers[?(@.name=="nginx")].image', comparator: 'contains', value: 'nginx' },
+          { path: '$.status.phase', comparator: 'equals', value: 'Failed', negate: true },
+        ],
+        polling: { timeoutSeconds: 30, intervalSeconds: 2 },
+      },
+    }))).resolves.toBe(true);
+  });
+
+  it('throws when one entry of the array never matches, naming that path', async () => {
+    await expect(executeTest(yaml({
+      wait: {
+        target: {
+          kind: 'Pod',
+          metadata: { namespace: NS, name: POD },
+          context: CONTEXT,
+        },
+        jsonPath: [
+          { path: '$.status.phase', comparator: 'equals', value: 'Running' },
+          { path: '$.status.phase', comparator: 'equals', value: 'Terminating' },
+        ],
+        polling: { timeoutSeconds: 4, intervalSeconds: 1 },
+      },
+    }))).rejects.toThrow(/[Tt]imed.out[\s\S]*\$\.status\.phase/);
+  });
 });
 
 // ── 2. command – pod exec ────────────────────────────────────────────────────
