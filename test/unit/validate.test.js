@@ -301,6 +301,9 @@ describe('validateTestDefinitions – k8s selector apiVersion', () => {
         },
       },
     }], 'apiVersion');
+  });
+});
+
 // ── connectionError expectation ──────────────────────────────────────
 
 describe('validateTestDefinitions – expect.connectionError', () => {
