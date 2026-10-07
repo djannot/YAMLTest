@@ -131,7 +131,9 @@ async function runConsecutive(yamlStr, consecutive) {
  * an overall wall-clock budget (maxtime).
  *
  * Knobs (all optional, read from the definition):
- *   retries      - max retry attempts after the first        (default 120)
+ *   retries      - max retry attempts after the first        (default 120);
+ *                  an error flagged `retryable: false` stops retrying at once
+ *                  (it cannot pass on a later attempt, e.g. a missing bodyFile)
  *   consecutive  - successful runs required per attempt       (default 1)
  *   timeout      - per-attempt cap in ms                      (default 10000)
  *   maxtime      - wall-clock cap on the whole retry loop;    (default max(180s, timeout+60s))
@@ -185,6 +187,11 @@ async function runSingleTest(def, index, overrides = {}) {
       };
     } catch (err) {
       lastError = err;
+      // A permanent error (e.g. a missing http.bodyFile) fails the same way on
+      // every attempt: report it now rather than retrying until the budget ends.
+      if (err && err.retryable === false) {
+        break;
+      }
       if (attempt < retries && Date.now() - start <= maxtimeMs) {
         await new Promise((r) => setTimeout(r, retryIntervalMs));
       }

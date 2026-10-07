@@ -111,6 +111,7 @@ Validation checks include:
 - Required fields per test type (e.g., `command.command`, `wait.target`)
 - Value types and allowed enums (e.g., `source.type` must be `local` or `pod`)
 - Conditional requirements (e.g., `source.type: pod` requires `selector`; `setVars` requires `expect` for HTTP/command tests)
+- Mutually exclusive fields (e.g., at most one of `http.body`, `http.bodyFile`, `http.bodyGenerate`)
 - Unknown property detection on sub-objects (catches typos like `htpp` instead of `http`)
 
 ---
@@ -172,6 +173,8 @@ Test any HTTP endpoint locally or from within a Kubernetes pod.
     params:
       key: value                      # query parameters
     body: '{"foo":"bar"}'             # request body (string or object)
+    # bodyFile: ./payload.bin         # or stream the body from a file (see "Large bodies")
+    # bodyGenerate: { size: 5000000 } # or a generated body; body / bodyFile / bodyGenerate: one at most
     skipSslVerification: true         # disable TLS verification
     maxRedirects: 0                   # redirects to follow (default: 0)
     cert: /path/to/cert.pem           # mTLS client certificate
@@ -188,11 +191,99 @@ Test any HTTP endpoint locally or from within a Kubernetes pod.
       - path: "$.user.id"
         comparator: equals
         value: 42
+    bodySize: 1234                    # exact body size in bytes (see "Large bodies")
     headers:
       - name: content-type
         comparator: contains
         value: application/json
 ```
+
+#### Large bodies
+
+An inline `body` must fit in the test file (and, with `usePodExec`, on a
+command line). For multi-MB or binary bodies, stream the request body instead,
+from a file or generated on the fly, and check a large response by its size:
+
+```yaml
+- name: 5 MB body with a tail marker is blocked
+  timeout: 60000                      # per attempt (default 10s): raise it for big transfers
+  http:
+    url: http://gateway.example
+    path: /sink
+    method: POST
+    headers: { Content-Type: text/plain }
+    bodyGenerate: { size: 5000000, suffix: "blocked-request-body" }
+  source: { type: local }
+  expect:
+    statusCode: 406
+
+- name: binary upload from a file
+  http:
+    url: http://gateway.example
+    path: /upload
+    method: PUT
+    headers: { Content-Type: application/octet-stream }
+    bodyFile: "${BODIES_DIR}/20mb.bin"
+  source: { type: local }
+  expect:
+    statusCode: 200
+
+- name: 20 MB response arrives in full
+  http:
+    url: http://gateway.example
+    path: /bytes/20000000
+    method: GET
+  source: { type: local }
+  expect:
+    statusCode: 200
+    bodySize: 20000000
+```
+
+| Field | Meaning |
+| --- | --- |
+| `http.bodyFile` | Path of a file sent as the request body, byte for byte. `$VAR` / `${VAR}` is resolved in the path, never in the file's contents, so binary files stay intact. A relative path is resolved against the working directory. |
+| `http.bodyGenerate` | A generated body of exactly `size` bytes: `fill` (default `"a"`) repeated, with `suffix` (default none) as the last bytes. Sizes count UTF-8 bytes; the last repetition of `fill` is cut short to fit. Not substituted. |
+| `expect.bodySize` | The exact size of the response body in bytes, as received (after any gzip/deflate/br decoding). |
+
+How they behave:
+
+- **Streamed, never held in memory.** `bodyFile` and `bodyGenerate` are
+  streamed with a `Content-Length` taken from the file's size (or `size`).
+  Set a `Transfer-Encoding: chunked` (or your own `Content-Length`) header to
+  override it. With `expect.bodySize` and no assertion or `setVars` rule that
+  reads the body (`body`, `bodyContains`, `bodyRegex`, `bodyJsonPath`;
+  `setVars` `jsonPath`, `body`, `regex`), the response is counted as it
+  streams instead of being buffered; on failure the report shows its size and
+  its first 4 KiB. Otherwise the body is buffered as usual and `bodySize` is
+  checked as well. Client memory stays flat whatever the size: in our runs a
+  1 GiB upload or download added about 15–125 MiB (mostly Node read buffers
+  awaiting garbage collection), the same as with 4 GiB.
+- **One body at most.** `body`, `bodyFile` and `bodyGenerate` are mutually
+  exclusive; combining them is a validation error (also with `--check`).
+- **A missing file fails at once.** An unreadable `bodyFile` fails the test on
+  the first attempt with an error that names the path, without retrying.
+  `--check` does not look at the file, which may be created by an earlier step.
+- **Sources.** All three work with `source.type: local`, and with pods through
+  `usePortForward` (the same streaming client, through the tunnel) or
+  `usePodExec`. With `usePodExec` the body is piped to the pod's curl through
+  `kubectl exec -i … curl --data-binary @-` rather than put on the command
+  line, so it is not limited by the 128 KiB per-argument cap on Linux and its
+  bytes are not touched by the shell (curl itself reads the whole body into
+  memory before sending it, inside the pod); for `bodySize` alone the
+  response is dropped in the pod and only its size comes back. The default
+  `kubectl debug` pod mode supports `bodySize` but not `bodyFile` /
+  `bodyGenerate` (a validation error): it cannot stream a request body.
+- **Time.** Raise the test's `timeout` (10s per attempt by default) for large
+  transfers; an attempt that runs out of time is retried, and its transfer is
+  not cancelled.
+- **No redirects.** `maxRedirects` must stay 0 (the default) with `bodyFile`
+  or `bodyGenerate` (a validation error otherwise): following a 307/308 means
+  replaying the body, which a stream cannot do without holding all of it in
+  memory. Assert the redirect's status instead.
+- **Early responses.** A server that answers before reading the whole body
+  (a size limit, a WAF block) is reported with its status code. If it also
+  resets the connection without draining it, the reset occasionally wins and
+  the attempt fails as a connection error; the next attempt usually passes.
 
 #### Asserting a connection failure
 
@@ -233,8 +324,8 @@ run the test once and read the reported error rather than guessing.
 Notes:
 
 - `connectionError` cannot be combined with response-based expectations
-  (`statusCode`, `body`, `bodyContains`, `bodyRegex`, `bodyJsonPath`, `headers`) —
-  a failed connection produces no response to assert on.
+  (`statusCode`, `body`, `bodyContains`, `bodyRegex`, `bodyJsonPath`, `bodySize`,
+  `headers`) — a failed connection produces no response to assert on.
 - If the request unexpectedly **succeeds**, the test fails.
 - Configuration errors (such as an unreadable `cert`/`key`/`ca` file) are *not*
   connection errors and still fail the test loudly.
@@ -249,7 +340,7 @@ Notes:
 
 #### Environment variable substitution
 
-Any `$VAR` or `${VAR}` in the `url`, `path`, `headers`, `body`, or `params` fields is resolved from the environment:
+Any `$VAR` or `${VAR}` in the `url`, `path`, `headers`, `body`, `params`, or `bodyFile` (the path only, never the file's contents) fields is resolved from the environment:
 
 ```yaml
 http:
@@ -616,7 +707,7 @@ Tests run **sequentially** and stop at the first failure (fail-fast).
   expect: { exitCode: 0, stdout: { contains: "Running" } }
 ```
 
-### Environment variables in url, path, headers, body, and params
+### Environment variables in url, path, headers, body, params, and bodyFile
 
 ```yaml
 http:
@@ -627,6 +718,7 @@ http:
   body: '{"id": "${REQUEST_ID}"}'
   params:
     apiKey: "${API_KEY}"
+  # bodyFile: "${BODIES_DIR}/payload.bin"   # the path only; the file is sent as is
 ```
 
 ### setVars — variable passing between steps
@@ -796,6 +888,11 @@ npm run test:integration    # integration tests only
 npm run test:e2e            # end-to-end CLI tests only
 npm run test:coverage       # with coverage report
 ```
+
+The large-body integration tests (`test/integration/largeBody.test.js`) stream
+1 GiB each way through a local server, write a 1 GiB temporary file, and check
+that the client's memory stays flat. Set `YAMLTEST_LARGE_BODY_BYTES` to use
+another size.
 
 ---
 

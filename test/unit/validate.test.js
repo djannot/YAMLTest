@@ -369,6 +369,154 @@ describe('validateTestDefinitions – expect.connectionError', () => {
   it('rejects an un-compilable matches pattern', () => {
     expectInvalid(connErr({ matches: 'ECONN(' }), 'valid regular expression');
   });
+
+  it('rejects connectionError combined with bodySize', () => {
+    expectInvalid([{
+      source: { type: 'local' },
+      http: { url: 'https://example.com' },
+      expect: { connectionError: true, bodySize: 10 },
+    }], 'cannot be combined');
+  });
+});
+
+// ── Large bodies: bodyFile, bodyGenerate, bodySize ───────────────────
+
+describe('validateTestDefinitions – http.bodyFile / http.bodyGenerate', () => {
+  const httpTest = (http, source = { type: 'local' }) => [{
+    source,
+    http: { url: 'http://example.com', method: 'POST', ...http },
+    expect: { statusCode: 200 },
+  }];
+  const podSource = (extra) => ({
+    type: 'pod',
+    selector: { kind: 'Pod', metadata: { namespace: 'default', name: 'client' } },
+    ...extra,
+  });
+  const exclusive = 'body, bodyFile and bodyGenerate are mutually exclusive';
+  const noDebugMode = 'http.bodyFile and http.bodyGenerate need source.type: local, or a pod source with usePodExec or usePortForward';
+
+  it('accepts bodyFile, including a ${VAR} path', () => {
+    expectValid(httpTest({ bodyFile: '/data/body.bin' }));
+    expectValid(httpTest({ bodyFile: '${BODIES}/5mb.bin' }));
+  });
+
+  it('rejects an empty or non-string bodyFile', () => {
+    expectInvalid(httpTest({ bodyFile: '' }), 'bodyFile');
+    expectInvalid(httpTest({ bodyFile: 42 }), 'must be string');
+  });
+
+  it('accepts bodyGenerate with size only, and with fill and suffix', () => {
+    expectValid(httpTest({ bodyGenerate: { size: 5000000 } }));
+    expectValid(httpTest({ bodyGenerate: { size: 5000000, fill: 'a', suffix: 'blocked-request-body' } }));
+    expectValid(httpTest({ bodyGenerate: { size: 0 } }));
+  });
+
+  it('accepts a suffix exactly as long as size', () => {
+    expectValid(httpTest({ bodyGenerate: { size: 3, suffix: 'end' } }));
+  });
+
+  it('rejects a suffix longer than size, counting UTF-8 bytes', () => {
+    expectInvalid(httpTest({ bodyGenerate: { size: 3, suffix: 'four' } }), 'suffix must not be longer than size');
+    // "éé" is 2 characters but 4 bytes
+    expectInvalid(httpTest({ bodyGenerate: { size: 3, suffix: 'éé' } }), 'suffix must not be longer than size');
+  });
+
+  it('rejects a bodyGenerate without size, or with a negative or fractional size', () => {
+    expectInvalid(httpTest({ bodyGenerate: { fill: 'a' } }), 'missing required property "size"');
+    expectInvalid(httpTest({ bodyGenerate: { size: -1 } }), 'must be >= 0');
+    expectInvalid(httpTest({ bodyGenerate: { size: 1.5 } }), 'must be integer');
+    expectInvalid(httpTest({ bodyGenerate: { size: '5MB' } }), 'must be integer');
+  });
+
+  it('rejects an empty fill and unknown bodyGenerate keys', () => {
+    expectInvalid(httpTest({ bodyGenerate: { size: 1, fill: '' } }), 'fill');
+    expectInvalid(httpTest({ bodyGenerate: { size: 1, sufix: 'x' } }), 'unknown property "sufix"');
+  });
+
+  it('rejects body together with bodyFile', () => {
+    expectInvalid(httpTest({ body: 'inline', bodyFile: '/data/body.bin' }), exclusive);
+  });
+
+  it('rejects body together with bodyGenerate', () => {
+    expectInvalid(httpTest({ body: { a: 1 }, bodyGenerate: { size: 10 } }), exclusive);
+  });
+
+  it('rejects bodyFile together with bodyGenerate', () => {
+    expectInvalid(httpTest({ bodyFile: '/data/body.bin', bodyGenerate: { size: 10 } }), exclusive);
+  });
+
+  it('applies the same rules to httpBodyComparison requests', () => {
+    expectValid([{
+      httpBodyComparison: {
+        request1: { http: { url: 'http://a.com', bodyFile: '/data/body.bin' }, source: { type: 'local' } },
+        request2: { http: { url: 'http://b.com', bodyGenerate: { size: 10 } }, source: { type: 'local' } },
+      },
+    }]);
+    expectInvalid([{
+      httpBodyComparison: {
+        request1: { http: { url: 'http://a.com', body: 'x', bodyFile: '/data/body.bin' }, source: { type: 'local' } },
+        request2: { http: { url: 'http://b.com' }, source: { type: 'local' } },
+      },
+    }], exclusive);
+  });
+
+  it('accepts bodyFile / bodyGenerate with usePodExec or usePortForward', () => {
+    expectValid(httpTest({ bodyFile: '/data/body.bin' }, podSource({ usePodExec: true })));
+    expectValid(httpTest({ bodyGenerate: { size: 10 } }, podSource({ usePortForward: true })));
+  });
+
+  it('rejects bodyFile / bodyGenerate in the default kubectl-debug pod mode', () => {
+    expectInvalid(httpTest({ bodyFile: '/data/body.bin' }, podSource()), noDebugMode);
+    expectInvalid(httpTest({ bodyGenerate: { size: 10 } }, podSource({ usePodExec: false })), noDebugMode);
+    expectInvalid([{
+      httpBodyComparison: {
+        request1: { http: { url: 'http://a.com', bodyFile: '/data/body.bin' }, source: podSource() },
+        request2: { http: { url: 'http://b.com' }, source: { type: 'local' } },
+      },
+    }], noDebugMode);
+  });
+
+  it('still accepts an inline body in the default kubectl-debug pod mode', () => {
+    expectValid(httpTest({ body: '{"a":1}' }, podSource()));
+  });
+
+  it('rejects maxRedirects above 0 with a streamed body', () => {
+    const replay = 'must be 0 (the default) with bodyFile or bodyGenerate';
+    expectInvalid(httpTest({ bodyFile: '/data/body.bin', maxRedirects: 3 }), replay);
+    expectInvalid(httpTest({ bodyGenerate: { size: 10 }, maxRedirects: 1 }), replay);
+    expectValid(httpTest({ bodyFile: '/data/body.bin', maxRedirects: 0 }));
+    expectValid(httpTest({ body: 'inline', maxRedirects: 3 }));
+  });
+});
+
+describe('validateTestDefinitions – expect.bodySize', () => {
+  const sized = (bodySize, extra = {}) => [{
+    source: { type: 'local' },
+    http: { url: 'http://example.com' },
+    expect: { bodySize, ...extra },
+  }];
+
+  it('accepts a byte count, alone or with other assertions', () => {
+    expectValid(sized(20000000));
+    expectValid(sized(0));
+    expectValid(sized(10, { statusCode: 200, bodyContains: 'x', headers: [{ name: 'a', comparator: 'exists' }] }));
+  });
+
+  it('rejects a negative, fractional or string bodySize', () => {
+    expectInvalid(sized(-1), 'must be >= 0');
+    expectInvalid(sized(1.5), 'must be integer');
+    expectInvalid(sized('20MB'), 'must be integer');
+  });
+
+  it('accepts bodySize in every pod mode', () => {
+    for (const extra of [{}, { usePodExec: true }, { usePortForward: true }]) {
+      expectValid([{
+        source: { type: 'pod', selector: { kind: 'Pod', metadata: { name: 'client' } }, ...extra },
+        http: { url: 'http://example.com' },
+        expect: { bodySize: 10 },
+      }]);
+    }
+  });
 });
 
 // ── Test type mutual exclusivity ─────────────────────────────────────

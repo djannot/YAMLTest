@@ -17,14 +17,18 @@
  *   3. executePodHttpRequestViaPodExec    – http: + usePodExec: true
  *   4. executePodHttpRequestViaPortForward – http: + usePortForward: true
  *   5. debugPodWithHttpRequest     – http: + source.type: pod (default debug)
+ *   6. large bodies (bodyFile, bodyGenerate, bodySize) through modes 3–5,
+ *      against an echo server pod (node:slim) that hashes what it receives
  */
 
 import { execSync } from 'child_process';
+import crypto from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { executeTest } from '../../src/index.js';
+import { bodyEchoHandler } from '../fixtures/body-echo-server.js';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -37,6 +41,9 @@ const LABEL_KEY = 'app';
 const LABEL_VAL = 'yamltest-nginx';
 const IMAGE     = 'nginx:alpine';    // small, fast to pull
 const NODE_IMG  = 'node:slim';       // needed for kubectl debug path
+const ECHO_POD  = 'yamltest-echo';   // body echo server (node:slim)
+const ECHO_SVC  = 'yamltest-echo';
+const ECHO_PORT = 8080;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -120,20 +127,48 @@ beforeAll(async () => {
     },
   });
 
+  // 6. Body echo server for the large-body tests: the same handler as the
+  //    integration suite, run by node:slim (already loaded for kubectl debug)
+  const echoPodManifest = JSON.stringify({
+    apiVersion: 'v1',
+    kind: 'Pod',
+    metadata: { name: ECHO_POD, namespace: NS, labels: { app: ECHO_POD } },
+    spec: {
+      containers: [{
+        name: 'echo',
+        image: NODE_IMG,
+        imagePullPolicy: 'Never',
+        command: ['node', '-e', `require('http').createServer(${bodyEchoHandler.toString()}).listen(${ECHO_PORT})`],
+        ports: [{ containerPort: ECHO_PORT }],
+        readinessProbe: { tcpSocket: { port: ECHO_PORT }, periodSeconds: 1 },
+      }],
+    },
+  });
+  const echoSvcManifest = JSON.stringify({
+    apiVersion: 'v1',
+    kind: 'Service',
+    metadata: { name: ECHO_SVC, namespace: NS },
+    spec: {
+      selector: { app: ECHO_POD },
+      ports: [{ port: ECHO_PORT, targetPort: ECHO_PORT }],
+      type: 'ClusterIP',
+    },
+  });
+
   // Write manifests to temp files and apply (idempotent)
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'yamltest-e2e-'));
-  const podFile = path.join(tmpDir, 'pod.json');
-  const svcFile = path.join(tmpDir, 'svc.json');
-  fs.writeFileSync(podFile, podManifest);
-  fs.writeFileSync(svcFile, svcManifest);
-  run(`kubectl --context=${CONTEXT} apply -f ${podFile}`);
-  run(`kubectl --context=${CONTEXT} apply -f ${svcFile}`);
+  const manifests = { pod: podManifest, svc: svcManifest, echoPod: echoPodManifest, echoSvc: echoSvcManifest };
+  for (const [name, manifest] of Object.entries(manifests)) {
+    const file = path.join(tmpDir, `${name}.json`);
+    fs.writeFileSync(file, manifest);
+    run(`kubectl --context=${CONTEXT} apply -f ${file}`);
+  }
   fs.rmSync(tmpDir, { recursive: true, force: true });
 
-  // 6. Wait for the pod to be Ready
-  console.log(`[kubectl-e2e] Waiting for pod ${POD} to be Ready…`);
+  // 7. Wait for the pods to be Ready
+  console.log(`[kubectl-e2e] Waiting for pods ${POD} and ${ECHO_POD} to be Ready…`);
   run(
-    `kubectl --context=${CONTEXT} -n ${NS} wait pod/${POD} ` +
+    `kubectl --context=${CONTEXT} -n ${NS} wait pod/${POD} pod/${ECHO_POD} ` +
     `--for=condition=Ready --timeout=120s`
   );
 
@@ -512,6 +547,147 @@ describe('http – kubectl debug (ephemeral node:slim container)', () => {
         selector: selectorByLabel(),
       },
       expect: { statusCode: 200 },
+    }))).resolves.toBe(true);
+  });
+});
+
+// ── 6. Large bodies: bodyFile, bodyGenerate, bodySize ─────────────────────────
+
+describe('http – large bodies', () => {
+  const echoUrl = `http://${ECHO_SVC}.${NS}.svc.cluster.local:${ECHO_PORT}`;
+  const KiB = 1024;
+  const MiB = 1024 * KiB;
+  let tmpDir;
+  let bodyFile;
+  let bodySha;
+
+  const sha256 = (buffer) => crypto.createHash('sha256').update(buffer).digest('hex');
+  // Assertions on the echo server's JSON summary of the body it received
+  const received = (fields) =>
+    Object.entries(fields).map(([key, value]) => ({ path: `$.${key}`, comparator: 'equals', value }));
+  const podExec = () => ({ type: 'pod', usePodExec: true, selector: selectorByName() });
+  const portForwardToEcho = () => ({
+    type: 'pod',
+    usePortForward: true,
+    selector: { kind: 'Pod', metadata: { namespace: NS, name: ECHO_POD }, context: CONTEXT },
+  });
+
+  beforeAll(() => {
+    // 300 KiB, well above the 128 KiB a single argv string may hold on Linux,
+    // made of every byte value plus quotes, $ and backticks, which the
+    // `sh -c "..."` command line would mangle.
+    const tricky = Buffer.concat([
+      Buffer.from(Array.from({ length: 256 }, (_, i) => i)),
+      Buffer.from('"double" \'single\' $HOME ${HOME} `tick` \\ \r\n'),
+    ]);
+    const content = Buffer.alloc(300 * KiB, tricky);
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'yamltest-e2e-bodies-'));
+    bodyFile = path.join(tmpDir, 'tricky-300k.bin');
+    fs.writeFileSync(bodyFile, content);
+    bodySha = sha256(content);
+  });
+
+  afterAll(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('usePodExec: sends a 300 KiB binary bodyFile through stdin, byte for byte', async () => {
+    await expect(executeTest(yaml({
+      http: { url: echoUrl, method: 'POST', path: '/upload', bodyFile },
+      source: podExec(),
+      expect: {
+        statusCode: 200,
+        bodyJsonPath: received({ method: 'POST', bytes: 300 * KiB, sha256: bodySha, contentLength: String(300 * KiB) }),
+      },
+    }))).resolves.toBe(true);
+  });
+
+  it('usePodExec: sends a 3 MiB bodyGenerate (curl sends Expect: 100-continue)', async () => {
+    await expect(executeTest(yaml({
+      http: {
+        url: echoUrl, method: 'PUT', path: '/upload',
+        headers: { 'Content-Type': 'text/plain' },
+        bodyGenerate: { size: 3 * MiB, suffix: 'blocked-request-body' },
+      },
+      source: podExec(),
+      expect: {
+        statusCode: 200,   // the final status, not the interim 100 Continue
+        bodyJsonPath: received({
+          method: 'PUT',
+          bytes: 3 * MiB,
+          expect: '100-continue',
+          tail: `${'a'.repeat(44)}blocked-request-body`,
+        }),
+      },
+    }))).resolves.toBe(true);
+  });
+
+  it('usePodExec: counts a response body with bodySize (dropped in the pod)', async () => {
+    await expect(executeTest(yaml({
+      http: { url: echoUrl, method: 'GET', path: `/bytes/${5 * MiB}` },
+      source: podExec(),
+      expect: {
+        statusCode: 200,
+        bodySize: 5 * MiB,
+        headers: [{ name: 'content-length', comparator: 'equals', value: String(5 * MiB) }],
+      },
+    }))).resolves.toBe(true);
+  });
+
+  it('usePodExec: bodySize alongside a body assertion', async () => {
+    await expect(executeTest(yaml({
+      http: { url: echoUrl, method: 'GET', path: '/bytes/2000' },
+      source: podExec(),
+      expect: { statusCode: 200, bodySize: 2000, bodyRegex: '^x{2000}$' },
+    }))).resolves.toBe(true);
+  });
+
+  it('usePodExec: fails a bodySize mismatch', async () => {
+    await expect(executeTest(yaml({
+      http: { url: echoUrl, method: 'GET', path: '/bytes/2000' },
+      source: podExec(),
+      expect: { statusCode: 200, bodySize: 1999 },
+    }))).rejects.toThrow('Body size mismatch: expected 1999 bytes, got 2000 bytes');
+  });
+
+  it('usePodExec: still sends an inline body on the command line, as before', async () => {
+    await expect(executeTest(yaml({
+      http: { url: echoUrl, method: 'POST', path: '/form', body: 'hello=world' },
+      source: podExec(),
+      expect: { statusCode: 200, bodyJsonPath: received({ method: 'POST', bytes: 11, sha256: sha256(Buffer.from('hello=world')) }) },
+    }))).resolves.toBe(true);
+  });
+
+  it('usePodExec: a missing bodyFile fails before any kubectl call', async () => {
+    const missing = path.join(tmpDir, 'missing.bin');
+    await expect(executeTest(yaml({
+      http: { url: echoUrl, method: 'POST', path: '/upload', bodyFile: missing },
+      source: podExec(),
+      expect: { statusCode: 200 },
+    }))).rejects.toThrow(`http.bodyFile not found: ${missing}`);
+  });
+
+  it('usePortForward: streams a bodyFile through the tunnel', async () => {
+    await expect(executeTest(yaml({
+      http: { url: `http://localhost:${ECHO_PORT}`, method: 'POST', path: '/upload', bodyFile },
+      source: portForwardToEcho(),
+      expect: { statusCode: 200, bodyJsonPath: received({ bytes: 300 * KiB, sha256: bodySha }) },
+    }))).resolves.toBe(true);
+  });
+
+  it('usePortForward: counts a response body with bodySize', async () => {
+    await expect(executeTest(yaml({
+      http: { url: `http://localhost:${ECHO_PORT}`, method: 'GET', path: `/bytes/${8 * MiB}` },
+      source: portForwardToEcho(),
+      expect: { statusCode: 200, bodySize: 8 * MiB },
+    }))).resolves.toBe(true);
+  });
+
+  it('kubectl debug: counts a response body with bodySize', async () => {
+    await expect(executeTest(yaml({
+      http: { url: echoUrl, method: 'GET', path: `/bytes/${2 * MiB}` },
+      source: { type: 'pod', selector: selectorByName() },
+      expect: { statusCode: 200, bodySize: 2 * MiB },
     }))).resolves.toBe(true);
   });
 });

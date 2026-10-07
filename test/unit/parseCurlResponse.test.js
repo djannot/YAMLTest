@@ -1,55 +1,13 @@
 'use strict';
 
 /**
- * Tests for parseCurlResponse – an internal function.
- * We inline the implementation here (identical copy from v2.js) so these tests
- * remain pure and don't rely on exports that aren't part of the public API.
+ * Tests for parseCurlResponse – the internal parser for the `curl -i` output of
+ * the usePodExec HTTP mode. These run against the real function (exported from
+ * core.js for tests) rather than a copy, so they guard the code that ships.
  */
 
 import { describe, it, expect } from 'vitest';
-
-// ── Inline implementation mirror ─────────────────────────────────────────────
-function parseCurlResponse(curlOutput) {
-  const parts = curlOutput.split('---RESPONSE_END---');
-  const responseData = parts[0].trim();
-
-  if (!responseData) {
-    throw new Error('No response data found in curl output');
-  }
-
-  const lines = responseData.split('\n');
-  let statusCode = 200;
-  const headers = {};
-  let bodyStartIndex = -1;
-
-  if (lines.length > 0 && lines[0].startsWith('HTTP/')) {
-    const statusMatch = lines[0].match(/HTTP\/\d+(?:\.\d+)?\s+(\d+)/);
-    if (statusMatch) {
-      statusCode = parseInt(statusMatch[1], 10);
-    }
-  }
-
-  for (let i = 1; i < lines.length; i++) {
-    const line = lines[i];
-    if (line.trim() === '') {
-      bodyStartIndex = i + 1;
-      break;
-    }
-    const colonIndex = line.indexOf(':');
-    if (colonIndex > 0) {
-      const headerName = line.substring(0, colonIndex).trim().toLowerCase();
-      const headerValue = line.substring(colonIndex + 1).trim();
-      headers[headerName] = headerValue;
-    }
-  }
-
-  let body = '';
-  if (bodyStartIndex >= 0 && bodyStartIndex < lines.length) {
-    body = lines.slice(bodyStartIndex).join('\n');
-  }
-
-  return { statusCode, headers, body: body.trim() };
-}
+import { parseCurlResponse } from '../../src/core.js';
 
 // ── Tests ────────────────────────────────────────────────────────────────────
 
@@ -115,6 +73,67 @@ describe('parseCurlResponse', () => {
     const raw = 'HTTP/1.1 204 No Content\nContent-Length: 0\n\n\n---RESPONSE_END---';
     const r = parseCurlResponse(raw);
     expect(r.statusCode).toBe(204);
+    expect(r.body).toBe('');
+  });
+});
+
+// curl sends "Expect: 100-continue" for a request body over 1 MiB, and `-i`
+// then prints the interim "100 Continue" response before the real one.
+describe('parseCurlResponse – interim 1xx responses', () => {
+  it('skips a 100 Continue before the final response (CRLF, as curl prints it)', () => {
+    const raw =
+      'HTTP/1.1 100 Continue\r\n\r\n' +
+      'HTTP/1.1 413 Payload Too Large\r\ncontent-type: text/plain\r\ncontent-length: 9\r\n\r\n' +
+      'too large\n---RESPONSE_END---\n';
+    const r = parseCurlResponse(raw);
+    expect(r.statusCode).toBe(413);
+    expect(r.headers['content-type']).toBe('text/plain');
+    expect(r.body).toBe('too large');
+  });
+
+  it('skips several interim responses, including ones with headers', () => {
+    const raw =
+      'HTTP/1.1 103 Early Hints\r\nlink: </style.css>; rel=preload\r\n\r\n' +
+      'HTTP/1.1 100 Continue\r\n\r\n' +
+      'HTTP/1.1 200 OK\r\nx-final: yes\r\n\r\n' +
+      'done\n---RESPONSE_END---\n';
+    const r = parseCurlResponse(raw);
+    expect(r.statusCode).toBe(200);
+    expect(r.headers).toEqual({ 'x-final': 'yes' });
+    expect(r.body).toBe('done');
+  });
+
+  it('skips an HTTP/2 interim response', () => {
+    const raw = 'HTTP/2 100\r\n\r\nHTTP/2 201\r\nlocation: /x\r\n\r\ncreated\n---RESPONSE_END---\n';
+    const r = parseCurlResponse(raw);
+    expect(r.statusCode).toBe(201);
+    expect(r.headers.location).toBe('/x');
+  });
+
+  it('does not skip a body that happens to start like a status line', () => {
+    const raw = 'HTTP/1.1 200 OK\r\n\r\nHTTP/1.1 100 Continue\n---RESPONSE_END---\n';
+    const r = parseCurlResponse(raw);
+    expect(r.statusCode).toBe(200);
+    expect(r.body).toBe('HTTP/1.1 100 Continue');
+  });
+
+  it('keeps a lone interim response when no final one arrived', () => {
+    const r = parseCurlResponse('HTTP/1.1 100 Continue\r\n\r\n\n---RESPONSE_END---\n');
+    expect(r.statusCode).toBe(100);
+  });
+});
+
+// expect.bodySize without a body assertion: curl drops the body in the pod
+// (-o /dev/null), dumps the headers (-D -), and prints %{size_download}.
+describe('parseCurlResponse – header dump with the body size after the marker', () => {
+  it('parses status and headers with an empty body', () => {
+    const raw =
+      'HTTP/1.1 100 Continue\r\n\r\n' +
+      'HTTP/1.1 200 OK\r\ncontent-length: 5000000\r\n\r\n' +
+      '\n---RESPONSE_END---\n5000000';
+    const r = parseCurlResponse(raw);
+    expect(r.statusCode).toBe(200);
+    expect(r.headers['content-length']).toBe('5000000');
     expect(r.body).toBe('');
   });
 });
