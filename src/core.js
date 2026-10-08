@@ -1,6 +1,9 @@
 const axios = require('axios');
 const https = require('https');
 const fs = require('fs-extra');
+const fsp = require('fs').promises;
+const path = require('path');
+const { Readable, Transform, pipeline } = require('stream');
 const { execSync, spawn } = require('child_process');
 const { JSONPath } = require('jsonpath-plus');
 const diff = require('deep-diff').diff;
@@ -148,7 +151,11 @@ module.exports = {
   executePodHttpRequestViaPodExec,
   applySetVars,
   isConnectionError,
-  validateConnectionError
+  validateConnectionError,
+  createGeneratedBodyStream,
+  openRequestBody,
+  responseBodyPlan,
+  parseCurlResponse
 };
 
 /**
@@ -665,6 +672,263 @@ async function discoverServiceLoadBalancerIpAndPort(selector, portSpec) {
   }
 }
 
+// ── Large request and response bodies ──────────────────────────────────────
+
+/**
+ * Mark an error as permanent: retrying the test cannot fix it (e.g. a missing
+ * http.bodyFile), so the runner reports it after the first attempt instead of
+ * retrying until the retries/maxtime budget runs out.
+ */
+function nonRetryable(error) {
+  error.retryable = false;
+  return error;
+}
+
+/**
+ * The error for an http.bodyFile that cannot be sent. It names the resolved
+ * path and is non-retryable.
+ */
+function bodyFileError(filePath, cause) {
+  if (!cause) {
+    return nonRetryable(new Error(`http.bodyFile is not a regular file: ${filePath}`));
+  }
+  if (cause.code === 'ENOENT') {
+    return nonRetryable(new Error(`http.bodyFile not found: ${filePath}`));
+  }
+  return nonRetryable(new Error(`http.bodyFile cannot be read: ${filePath} (${cause.code || cause.message})`));
+}
+
+const GENERATED_BODY_BLOCK_BYTES = 64 * 1024;
+
+/**
+ * Stream exactly `size` bytes: `fill` repeated, ending with `suffix`. Sizes
+ * are UTF-8 bytes, and the last repetition of `fill` is cut short to fit.
+ * Every chunk is a slice of one block holding a whole number of `fill`
+ * repetitions, so the pattern runs on across chunks and memory stays at one
+ * block whatever `size` is.
+ */
+function createGeneratedBodyStream({ size, fill = 'a', suffix = '' }) {
+  const suffixBytes = Buffer.from(suffix, 'utf8');
+  const fillBytes = Buffer.from(fill, 'utf8');
+  let fillerLeft = size - suffixBytes.length;
+  if (!Number.isSafeInteger(size) || fillerLeft < 0 || (fillerLeft > 0 && fillBytes.length === 0)) {
+    throw nonRetryable(new Error(
+      `http.bodyGenerate cannot produce ${size} bytes from fill ${JSON.stringify(fill)} and a ${suffixBytes.length}-byte suffix`
+    ));
+  }
+  const repetitions = Math.max(1, Math.floor(GENERATED_BODY_BLOCK_BYTES / Math.max(1, fillBytes.length)));
+  const block = Buffer.alloc(repetitions * fillBytes.length, fillBytes);
+  let suffixPending = suffixBytes.length > 0;
+
+  return new Readable({
+    read() {
+      if (fillerLeft > 0) {
+        const n = Math.min(fillerLeft, block.length);
+        fillerLeft -= n;
+        this.push(n === block.length ? block : block.subarray(0, n));
+      } else if (suffixPending) {
+        suffixPending = false;
+        this.push(suffixBytes);
+      } else {
+        this.push(null);
+      }
+    },
+  });
+}
+
+/**
+ * Open the body named by http.bodyFile or http.bodyGenerate. Returns null
+ * when the test has neither (an inline `body` is sent as before), otherwise
+ * { stream, size, source }: the bytes to send, their exact length (for
+ * Content-Length) and a label for messages. The file is opened here, before
+ * any request, so a missing or unreadable file is reported as a
+ * configuration error rather than mistaken for a connection failure.
+ * The caller must destroy the stream when the request is over.
+ */
+async function openRequestBody(httpConfig) {
+  if (typeof httpConfig.bodyFile === 'string') {
+    const filePath = path.resolve(httpConfig.bodyFile);
+    let handle;
+    try {
+      handle = await fsp.open(filePath, 'r');
+    } catch (error) {
+      throw bodyFileError(filePath, error);
+    }
+    try {
+      const stat = await handle.stat();
+      if (!stat.isFile()) {
+        throw bodyFileError(filePath);
+      }
+      return { stream: handle.createReadStream(), size: stat.size, source: `bodyFile ${filePath}` };
+    } catch (error) {
+      await handle.close().catch(() => {});
+      throw error.retryable === false ? error : bodyFileError(filePath, error);
+    }
+  }
+
+  if (httpConfig.bodyGenerate) {
+    const spec = httpConfig.bodyGenerate;
+    return { stream: createGeneratedBodyStream(spec), size: spec.size, source: `bodyGenerate (${spec.size} bytes)` };
+  }
+
+  return null;
+}
+
+/**
+ * Pass a request body through one chunk per event-loop turn. Piped straight
+ * into a request, each chunk is written as soon as it is read; when a server
+ * answers before reading the whole body (a 413, a WAF block) and closes the
+ * connection, the next write then fails with EPIPE / ECONNRESET before Node
+ * reads the response, and the test sees a "connection error" instead of the
+ * status code. Handing each chunk on from setImmediate (the check phase) lets
+ * the poll phase read a response that has arrived first.
+ */
+function yieldBetweenChunks(source) {
+  return pipeline(
+    source,
+    new Transform({
+      transform(chunk, _encoding, callback) {
+        setImmediate(callback, null, chunk);
+      },
+    }),
+    () => {} // errors surface on the returned stream
+  );
+}
+
+/**
+ * Copy of `headers` with Content-Length set for a streamed body, unless the
+ * test sets Content-Length or Transfer-Encoding itself (e.g. to send the body
+ * chunked).
+ */
+function withContentLength(headers, size) {
+  const names = Object.keys(headers).map((name) => name.toLowerCase());
+  if (names.includes('content-length') || names.includes('transfer-encoding')) {
+    return headers;
+  }
+  return { ...headers, 'Content-Length': String(size) };
+}
+
+// The response body is read in full (buffered), as before expect.bodySize.
+const BUFFERED_RESPONSE = { measureSize: false, keepBody: true };
+
+/**
+ * How much of the response body a test needs. With expect.bodySize the body
+ * is streamed and its bytes counted; it is also kept (and decoded) only when
+ * a body assertion or a setVars rule reads it. Otherwise it is never held in
+ * memory, so a test that asserts only statusCode, headers and bodySize can
+ * receive a response of any size.
+ * @param {object} test - Test (or httpBodyComparison request) config
+ * @returns {{measureSize: boolean, keepBody: boolean}}
+ */
+function responseBodyPlan(test) {
+  const expect = test.expect || {};
+  if (expect.bodySize === undefined) {
+    return BUFFERED_RESPONSE;
+  }
+  const readsBody = ['body', 'bodyContains', 'bodyRegex', 'bodyJsonPath'].some((key) => expect[key] !== undefined)
+    || Object.values(test.setVars || {}).some((rule) =>
+      rule && (rule.jsonPath !== undefined || rule.body === true || rule.regex !== undefined));
+  return { measureSize: true, keepBody: readsBody };
+}
+
+// Bytes of an unbuffered response body kept for the failure report.
+const BODY_PREVIEW_BYTES = 4096;
+
+/**
+ * Decode a response body the way axios decodes a buffered one: UTF-8 text
+ * without a BOM, parsed as JSON when it is JSON.
+ */
+function decodeResponseBody(bytes) {
+  let text = bytes.toString('utf8');
+  if (text.charCodeAt(0) === 0xfeff) {
+    text = text.slice(1);
+  }
+  if (!text) {
+    return text;
+  }
+  try {
+    return JSON.parse(text);
+  } catch (_) {
+    return text;
+  }
+}
+
+/**
+ * Read a streamed response body and count its bytes. With keepBody the body
+ * is collected and decoded; otherwise only its first BODY_PREVIEW_BYTES are
+ * kept, for the failure report, and `truncated` says whether that is all of it.
+ */
+async function readResponseBody(stream, keepBody) {
+  const chunks = [];
+  let size = 0;
+  let kept = 0;
+  try {
+    for await (const chunk of stream) {
+      size += chunk.length;
+      if (keepBody) {
+        chunks.push(chunk);
+      } else if (kept < BODY_PREVIEW_BYTES) {
+        const part = Buffer.from(chunk.subarray(0, BODY_PREVIEW_BYTES - kept));
+        chunks.push(part);
+        kept += part.length;
+      }
+    }
+  } catch (error) {
+    throw new Error(`Response body failed after ${size} bytes: ${error.message}`);
+  }
+  const bytes = Buffer.concat(chunks);
+  if (keepBody) {
+    return { size, body: decodeResponseBody(bytes), truncated: false };
+  }
+  return { size, body: bytes.toString('utf8'), truncated: size > kept };
+}
+
+/**
+ * Async counterpart of execSync(cmd, { encoding: 'utf8' }) that streams
+ * `input` to the command's stdin. Resolves with stdout; a non-zero exit
+ * rejects with an error carrying `status`, `stdout` and `stderr`, like
+ * execSync's, so callers can parse a partial response the same way. A failure
+ * to read `input` rejects with an error flagged `inputError`.
+ */
+function execWithStdin(cmd, input) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(cmd, { shell: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    const stdout = [];
+    const stderr = [];
+    let inputError = null;
+
+    child.stdout.on('data', (chunk) => stdout.push(chunk));
+    child.stderr.on('data', (chunk) => stderr.push(chunk));
+    // EPIPE: the command exited before reading all of its input. Its exit
+    // status, handled below, says why.
+    child.stdin.on('error', () => input.unpipe(child.stdin));
+    input.once('error', (error) => {
+      inputError = error;
+      child.kill();
+    });
+    input.pipe(child.stdin);
+
+    child.on('error', (error) => {
+      input.destroy();
+      reject(error);
+    });
+    child.on('close', (status, signal) => {
+      input.destroy();
+      if (inputError) {
+        reject(Object.assign(new Error(`Failed to read the request body: ${inputError.message}`), { inputError: true }));
+        return;
+      }
+      const out = Buffer.concat(stdout).toString('utf8');
+      const err = Buffer.concat(stderr).toString('utf8');
+      if (status === 0) {
+        resolve(out);
+        return;
+      }
+      reject(Object.assign(new Error(`Command failed: ${cmd}${err ? `\n${err}` : ''}`), { status, signal, stdout: out, stderr: err }));
+    });
+  });
+}
+
 /**
  * HTTP test executor - throws on failure following Mocha conventions
  * @param {object} test - The test configuration
@@ -728,6 +992,12 @@ async function executeHttpTest(test) {
     test.http.body = resolveEnvVarsInString(test.http.body);
   }
 
+  // Resolve environment variables in the bodyFile path. The file's contents
+  // are never substituted: they are sent byte for byte.
+  if (typeof test.http.bodyFile === 'string') {
+    test.http.bodyFile = resolveEnvVarsInString(test.http.bodyFile);
+  }
+
   // Resolve environment variables in query params (keys and string values)
   if (test.http.params && typeof test.http.params === 'object') {
     const resolvedParams = {};
@@ -755,8 +1025,18 @@ async function executeHttpTest(test) {
       headers: test.http.headers || {},
       params: test.http.params || {},
       body: test.http.body || null,
+      bodyFile: test.http.bodyFile,
+      bodyGenerate: test.http.bodyGenerate,
       sourceType: test.source.type
     }, null, 2)}`);
+
+    // Check a bodyFile before any request or kubectl call: a missing file
+    // fails at once, with a non-retryable error. The executors open it again
+    // to send it.
+    const requestBody = await openRequestBody(test.http);
+    if (requestBody) {
+      requestBody.stream.destroy();
+    }
 
     // Dispatch the request. When `expect.connectionError` is set, a thrown
     // transport-level failure (DNS/TCP/TLS) is the success condition rather than
@@ -766,7 +1046,7 @@ async function executeHttpTest(test) {
     try {
       if (test.source.type === 'local') {
         debugLog('Using local HTTP client');
-        response = await executeLocalHttpRequest(test.http);
+        response = await executeLocalHttpRequest(test.http, responseBodyPlan(test));
       } else if (test.source.type === 'pod') {
         if (!test.source.selector) {
           throw new Error('Kubernetes selector is required for pod-based tests');
@@ -798,7 +1078,8 @@ async function executeHttpTest(test) {
     debugLog(`Response received: ${JSON.stringify({
       statusCode: response.statusCode,
       headers: response.headers,
-      body: response.body
+      body: response.body,
+      bodySize: response.bodySize
     }, null, 2)}`);
 
     // Validate expectations - this will throw if validation fails
@@ -820,9 +1101,17 @@ async function executeHttpTest(test) {
         url: (test.http.url || '') + (test.http.path || ''),
         headers: test.http.headers || {},
         body: test.http.body || null,
+        ...(test.http.bodyFile !== undefined && { bodyFile: test.http.bodyFile }),
+        ...(test.http.bodyGenerate !== undefined && { bodyGenerate: test.http.bodyGenerate }),
       },
       response: response
-        ? { statusCode: response.statusCode, headers: response.headers, body: response.body }
+        ? {
+          statusCode: response.statusCode,
+          headers: response.headers,
+          body: response.body,
+          // An unbuffered body (expect.bodySize alone) is only a preview.
+          ...(response.bodySize !== undefined && { bodySize: response.bodySize, bodyTruncated: !!response.bodyTruncated }),
+        }
         : null,
     });
     throw error; // Re-throw so the runner records the failure (and the observed snapshot)
@@ -833,9 +1122,10 @@ async function executeHttpTest(test) {
 /**
  * Execute an HTTP request locally
  * @param {object} httpConfig - The HTTP request configuration
+ * @param {object} [plan] - How to read the response body (see responseBodyPlan)
  * @returns {Promise<object>} - The response object
  */
-async function executeLocalHttpRequest(httpConfig) {
+async function executeLocalHttpRequest(httpConfig, plan = BUFFERED_RESPONSE) {
   debugLog(`Executing local HTTP request: ${httpConfig.method} ${httpConfig.url}${httpConfig.path}`);
 
   // Configure HTTPS Agent with certificates if provided
@@ -887,19 +1177,55 @@ async function executeLocalHttpRequest(httpConfig) {
     debugLog(`SSL certificate verification is disabled`);
   }
 
+  // A bodyFile / bodyGenerate body is streamed, never read into memory.
+  const requestBody = await openRequestBody(httpConfig);
+  let requestBodyError = null;
+  if (requestBody) {
+    debugLog(`Streaming request body from ${requestBody.source}`);
+    requestBody.stream.once('error', (error) => { requestBodyError = error; });
+  }
+
+  // The response is read as a stream to count its size (expect.bodySize),
+  // and whenever the request body is streamed: axios then settles as soon as
+  // the response headers arrive, so a server that answers before reading the
+  // whole body (and closes the connection) is still reported with its status
+  // instead of an EPIPE from the unfinished upload.
+  const streamResponse = plan.measureSize || requestBody !== null;
+
   try {
     const response = await axios({
       method: httpConfig.method.toLowerCase(),
       url: `${httpConfig.url}${httpConfig.path}`,
-      headers: httpConfig.headers || {},
+      headers: requestBody
+        ? withContentLength(httpConfig.headers || {}, requestBody.size)
+        : httpConfig.headers || {},
       params: httpConfig.params || {},
       maxRedirects: httpConfig.maxRedirects || 0,
-      data: httpConfig.body,
+      data: requestBody ? yieldBetweenChunks(requestBody.stream) : httpConfig.body,
+      // -1 (no limit, also axios' default) so a large body is never capped
+      maxBodyLength: -1,
+      maxContentLength: -1,
+      ...(streamResponse && { responseType: 'stream' }),
       httpsAgent,
       validateStatus: () => true // Don't throw error on non-2xx status codes
     });
 
     debugLog(`Response received with status code: ${response.status}`);
+
+    if (streamResponse) {
+      const { size, body, truncated } = await readResponseBody(response.data, plan.keepBody);
+      // Destroyed so that aborting an unfinished upload below cannot make
+      // axios emit an unhandled 'error' on this stream.
+      response.data.destroy();
+      debugLog(`Response body: ${size} bytes${plan.keepBody ? '' : ' (counted, not buffered)'}`);
+      return {
+        statusCode: response.status,
+        headers: response.headers,
+        body,
+        ...(plan.measureSize && { bodySize: size }),
+        ...(truncated && { bodyTruncated: true }),
+      };
+    }
 
     return {
       statusCode: response.status,
@@ -908,7 +1234,16 @@ async function executeLocalHttpRequest(httpConfig) {
     };
   } catch (error) {
     debugLog(`Request failed: ${error.message}`);
+    // axios reports a failed body read as a failed request (no response),
+    // which would pass for a connection error. Report it as what it is.
+    if (requestBodyError) {
+      throw new Error(`Failed to read the request body from ${requestBody.source}: ${requestBodyError.message}`);
+    }
     throw error;
+  } finally {
+    if (requestBody) {
+      requestBody.stream.destroy();
+    }
   }
 }
 
@@ -945,7 +1280,8 @@ async function executePodHttpRequest(test) {
     const stdout = await debugPodWithHttpRequest(
       { ...selector, kind: 'Pod' }, // Ensure kind is set to Pod
       httpConfig,
-      container
+      container,
+      responseBodyPlan(test)
     );
 
     debugLog(`Debug output raw length: ${stdout.length} bytes`);
@@ -1119,7 +1455,7 @@ async function executePodHttpRequestViaPortForward(test) {
     debugLog(`Executing local HTTP request to ${localUrl}${httpConfig.path}`);
 
     // Execute the request locally
-    const response = await executeLocalHttpRequest(modifiedHttpConfig);
+    const response = await executeLocalHttpRequest(modifiedHttpConfig, responseBodyPlan(test));
 
     debugLog('Successfully executed HTTP request via port-forward');
     return response;
@@ -1148,6 +1484,11 @@ async function executePodHttpRequestViaPortForward(test) {
 async function executePodHttpRequestViaPodExec(test) {
   const sourceSelector = test.source.selector;
   const httpConfig = test.http;
+  const plan = responseBodyPlan(test);
+  // A bodyFile / bodyGenerate body is piped to curl's stdin through
+  // `kubectl exec -i`, never put on the command line: argv is capped (128 KiB
+  // per argument on Linux) and the shell would rewrite quotes and `$`.
+  const streamsBody = httpConfig.bodyFile !== undefined || httpConfig.bodyGenerate !== undefined;
 
   if (!sourceSelector) {
     throw new Error('Source selector is required for pod-exec mode');
@@ -1177,11 +1518,22 @@ async function executePodHttpRequestViaPodExec(test) {
       }
     }
 
-    // Construct the curl command - use -i to include headers in response
-    let curlCmd = `curl -s -i -w '\\n---RESPONSE_END---\\n'`;
+    // Construct the curl command - use -i to include headers in response.
+    // For expect.bodySize, -w also prints the body's size after the marker,
+    // and when nothing else reads the body it is dropped in the pod
+    // (-o /dev/null) with only the headers dumped (-D -).
+    let curlCmd;
+    if (!plan.measureSize) {
+      curlCmd = `curl -s -i -w '\\n---RESPONSE_END---\\n'`;
+    } else if (plan.keepBody) {
+      curlCmd = `curl -s -i -w '\\n---RESPONSE_END---\\n%{size_download}'`;
+    } else {
+      curlCmd = `curl -s -D - -o /dev/null -w '\\n---RESPONSE_END---\\n%{size_download}'`;
+    }
 
-    // Add method if not GET
-    if (httpConfig.method && httpConfig.method.toUpperCase() !== 'GET') {
+    // Add method if not GET. A streamed body always names it: curl would
+    // otherwise turn a GET with --data-binary into a POST.
+    if (httpConfig.method && (streamsBody || httpConfig.method.toUpperCase() !== 'GET')) {
       curlCmd += ` -X ${httpConfig.method.toUpperCase()}`;
     }
 
@@ -1196,6 +1548,11 @@ async function executePodHttpRequestViaPodExec(test) {
     if (httpConfig.body) {
       const bodyData = typeof httpConfig.body === 'string' ? httpConfig.body : JSON.stringify(httpConfig.body);
       curlCmd += ` -d '${bodyData.replace(/'/g, "\\'")}'`;
+    }
+
+    // A streamed body is read from stdin, byte for byte
+    if (streamsBody) {
+      curlCmd += ' --data-binary @-';
     }
 
     // Add skip SSL verification if requested
@@ -1231,8 +1588,8 @@ async function executePodHttpRequestViaPodExec(test) {
 
     curlCmd += ` '${targetUrl}'`;
 
-    // Build kubectl exec command
-    let kubectlCmd = `kubectl ${sourceContextArg} ${sourceNamespaceArg} exec ${sourcePodName}`;
+    // Build kubectl exec command (-i forwards our stdin for a streamed body)
+    let kubectlCmd = `kubectl ${sourceContextArg} ${sourceNamespaceArg} exec${streamsBody ? ' -i' : ''} ${sourcePodName}`;
     if (test.source.container) {
       kubectlCmd += ` -c ${test.source.container}`;
     }
@@ -1240,8 +1597,15 @@ async function executePodHttpRequestViaPodExec(test) {
 
     debugLog(`Executing curl via pod-exec: ${kubectlCmd}`);
 
+    const requestBody = streamsBody ? await openRequestBody(httpConfig) : null;
+    if (requestBody) {
+      debugLog(`Streaming request body from ${requestBody.source} to curl's stdin`);
+    }
+
     try {
-      const stdout = execSync(kubectlCmd, { encoding: 'utf8' });
+      const stdout = requestBody
+        ? await execWithStdin(kubectlCmd, requestBody.stream)
+        : execSync(kubectlCmd, { encoding: 'utf8' });
       debugLog(`Pod-exec curl command completed successfully`);
       debugLog(`Raw output: ${stdout}`);
 
@@ -1262,11 +1626,18 @@ async function executePodHttpRequestViaPodExec(test) {
         headers,
         body: parsedBody
       };
+      if (plan.measureSize) {
+        Object.assign(response, curlBodySizeFields(stdout, plan));
+      }
 
       debugLog(`Parsed response: status=${statusCode}, headers=${Object.keys(headers).length}, body length=${JSON.stringify(parsedBody).length}`);
       return response;
 
     } catch (error) {
+      // Not a curl failure: the request body could not be read
+      if (error.inputError) {
+        throw error;
+      }
       debugLog(`Pod-exec curl command failed: ${error.message}`);
 
       // Try to parse response from stdout even on error
@@ -1303,6 +1674,9 @@ async function executePodHttpRequestViaPodExec(test) {
         headers,
         body: parsedBody
       };
+      if (plan.measureSize && error.stdout) {
+        Object.assign(response, curlBodySizeFields(error.stdout.toString(), plan));
+      }
 
       debugLog(`Parsed error response: status=${statusCode}, headers=${Object.keys(headers).length}`);
       return response;
@@ -1310,8 +1684,22 @@ async function executePodHttpRequestViaPodExec(test) {
 
   } catch (error) {
     debugLog(`Failed to execute pod-exec HTTP request: ${error?.message || String(error)}`);
-    throw new Error(`Failed to execute pod-exec HTTP request: ${error?.message || String(error)}`);
+    const wrapped = new Error(`Failed to execute pod-exec HTTP request: ${error?.message || String(error)}`);
+    throw error?.retryable === false ? nonRetryable(wrapped) : wrapped;
   }
+}
+
+/**
+ * bodySize (and bodyTruncated) from curl output whose -w format printed
+ * %{size_download} after the end marker.
+ */
+function curlBodySizeFields(curlOutput, plan) {
+  const bodySize = parseInt((curlOutput.split('---RESPONSE_END---')[1] || '').trim(), 10);
+  if (Number.isNaN(bodySize)) {
+    return {};
+  }
+  // Without keepBody the body was dropped in the pod: none of it is here.
+  return { bodySize, ...(!plan.keepBody && bodySize > 0 && { bodyTruncated: true }) };
 }
 
 /**
@@ -1333,16 +1721,26 @@ function parseCurlResponse(curlOutput) {
   const headers = {};
   let bodyStartIndex = -1;
 
+  // Skip interim 1xx responses, such as the "100 Continue" a server sends
+  // when curl uploads a large body with "Expect: 100-continue": the status
+  // and headers that count are the final response's.
+  let start = 0;
+  while (/^HTTP\/\d+(?:\.\d+)?\s+1\d\d\b/.test(lines[start] || '')) {
+    const blankLine = lines.findIndex((line, i) => i > start && line.trim() === '');
+    if (blankLine === -1) break;
+    start = blankLine + 1;
+  }
+
   // Parse status line
-  if (lines.length > 0 && lines[0].startsWith('HTTP/')) {
-    const statusMatch = lines[0].match(/HTTP\/\d+(?:\.\d+)?\s+(\d+)/);
+  if (lines.length > start && lines[start].startsWith('HTTP/')) {
+    const statusMatch = lines[start].match(/HTTP\/\d+(?:\.\d+)?\s+(\d+)/);
     if (statusMatch) {
       statusCode = parseInt(statusMatch[1], 10);
     }
   }
 
   // Parse headers
-  for (let i = 1; i < lines.length; i++) {
+  for (let i = start + 1; i < lines.length; i++) {
     const line = lines[i];
 
     // Empty line separates headers from body
@@ -1378,9 +1776,10 @@ function parseCurlResponse(curlOutput) {
  * @param {object} selector - The Kubernetes selector
  * @param {object} httpConfig - The HTTP configuration
  * @param {string} container - Optional target container name
+ * @param {object} [plan] - How to read the response body (see responseBodyPlan)
  * @returns {Promise<string>} - The command output
  */
-async function debugPodWithHttpRequest(selector, httpConfig, container) {
+async function debugPodWithHttpRequest(selector, httpConfig, container, plan = BUFFERED_RESPONSE) {
   if (!selector.metadata.namespace) {
     throw new Error('Namespace is required in the Kubernetes selector');
   }
@@ -1425,7 +1824,7 @@ async function debugPodWithHttpRequest(selector, httpConfig, container) {
 
     // Create a temporary file with the Node.js HTTP request script
     const tempScriptPath = `/tmp/pod-http-request-${Date.now()}.js`;
-    const script = createHttpRequestScript(httpConfig);
+    const script = createHttpRequestScript(httpConfig, plan);
 
     fs.writeFileSync(tempScriptPath, script, 'utf8');
     debugLog(`Created temporary script at ${tempScriptPath}`);
@@ -1451,9 +1850,10 @@ async function debugPodWithHttpRequest(selector, httpConfig, container) {
 /**
  * Create a Node.js script for HTTP request
  * @param {object} httpConfig - The HTTP configuration
+ * @param {object} [plan] - How to read the response body (see responseBodyPlan)
  * @returns {string} - The script content
  */
-function createHttpRequestScript(httpConfig) {
+function createHttpRequestScript(httpConfig, plan = BUFFERED_RESPONSE) {
   return `
 const http = require('http');
 const https = require('https');
@@ -1493,10 +1893,12 @@ debugLog("Starting HTTP request to " + fullUrl);
 // Create request
 const req = (isHttps ? https : http).request(options, (res) => {
   let data = "";
+  let bodySize = 0;
 
-  // Collect response data
+  // Collect response data${plan.keepBody ? '' : ' (only counted: the test asserts just its size)'}
   res.on("data", (chunk) => {
-    data += chunk;
+    bodySize += chunk.length;
+    ${plan.keepBody ? 'data += chunk;' : ''}
   });
 
   // Process complete response
@@ -1519,6 +1921,7 @@ const req = (isHttps ? https : http).request(options, (res) => {
       headers: headers,
       body: body
     };
+    ${plan.measureSize ? `response.bodySize = bodySize;${plan.keepBody ? '' : ' response.bodyTruncated = bodySize > 0;'}` : ''}
 
     // Output the response with markers for easy extraction
     console.log("HTTP_RESPONSE_START");
@@ -1623,6 +2026,14 @@ function validateHttpExpectations(response, expect, testName) {
     throw new Error(`Status code mismatch: expected ${expect.statusCode}, got ${response.statusCode}`);
   }
   debugLog(`✓ Status code matches: ${response.statusCode}`);
+
+  // 1b) Body size, in bytes as received (after any content decoding)
+  if (expect.bodySize !== undefined) {
+    if (response.bodySize !== expect.bodySize) {
+      throw new Error(`Body size mismatch: expected ${expect.bodySize} bytes, got ${response.bodySize === undefined ? 'an unknown size' : `${response.bodySize} bytes`}`);
+    }
+    debugLog(`✓ Body size matches: ${response.bodySize} bytes`);
+  }
 
   const rawBody = typeof response.body === 'string'
     ? response.body
@@ -2600,6 +3011,9 @@ async function executeHttpRequestInternal(requestConfig) {
   }
   if (typeof requestConfig.http.body === 'string') {
     requestConfig.http.body = resolveEnvVarsInString(requestConfig.http.body);
+  }
+  if (typeof requestConfig.http.bodyFile === 'string') {
+    requestConfig.http.bodyFile = resolveEnvVarsInString(requestConfig.http.bodyFile);
   }
 
   let response;

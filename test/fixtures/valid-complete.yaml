@@ -43,6 +43,7 @@
         comparator: equals
         value: ok
         negate: false
+    bodySize: 15
     headers:
       - name: content-type
         comparator: contains
@@ -101,6 +102,44 @@
     path: /
   expect:
     statusCode: 200
+
+# ── HTTP test with a request body streamed from a file ───────────────
+- name: http-body-file
+  source:
+    type: local
+  http:
+    url: http://example.com
+    method: PUT
+    path: /upload
+    headers:
+      Content-Type: application/octet-stream
+    bodyFile: ${FIXTURES_DIR}/payload.bin
+  expect:
+    statusCode: 200
+    bodySize: 0
+
+# ── HTTP test with a generated request body (pod exec) ───────────────
+- name: http-body-generate-pod-exec
+  source:
+    type: pod
+    usePodExec: true
+    selector:
+      kind: Pod
+      metadata:
+        namespace: default
+        name: curl-client
+  http:
+    url: http://gateway.example
+    method: POST
+    path: /sink
+    headers:
+      Content-Type: text/plain
+    bodyGenerate:
+      size: 5000000
+      fill: "a"
+      suffix: "blocked-request-body"
+  expect:
+    statusCode: 406
 
 # ── Command test (local) with all fields ──────────────────────────────
 - name: command-all-fields

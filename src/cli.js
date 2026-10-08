@@ -144,11 +144,17 @@ function formatObserved(observed) {
   if (observed.type === 'http') {
     const req = observed.request || {};
     lines.push(`→ ${req.method || 'GET'} ${req.url || ''}`);
+    if (req.bodyFile !== undefined) lines.push(`→ bodyFile ${req.bodyFile}`);
+    if (req.bodyGenerate !== undefined) lines.push(`→ bodyGenerate ${truncate(req.bodyGenerate, 300)}`);
     const res = observed.response;
     if (res) {
       lines.push(`← status ${res.statusCode}`);
+      if (res.bodySize !== undefined) {
+        lines.push(`← body size ${res.bodySize} bytes`);
+      }
       if (res.body !== undefined && res.body !== null && res.body !== '') {
-        lines.push(`← body ${truncate(res.body)}`);
+        // bodyTruncated: the body was streamed, not buffered; only its start was kept
+        lines.push(`← body ${res.bodyTruncated ? '(start) ' : ''}${truncate(res.body)}`);
       }
     } else {
       lines.push('← no response (request failed before a response was received)');

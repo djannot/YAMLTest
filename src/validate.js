@@ -211,6 +211,21 @@ const sourceSchema = {
 
 // ── HTTP config ──────────────────────────────────────────────────────
 
+// A generated request body, streamed and never held in memory: exactly `size`
+// bytes of `fill` (default "a") repeated, ending with `suffix`.
+const bodyGenerateSchema = {
+  type: 'object',
+  required: ['size'],
+  properties: {
+    size: { type: 'integer', minimum: 0 },
+    fill: { type: 'string', minLength: 1 },
+    suffix: { type: 'string' },
+  },
+  additionalProperties: false,
+  bodyGenerateFits: true,
+  errorMessage: { bodyGenerateFits: 'suffix must not be longer than size (UTF-8 bytes)' },
+};
+
 const httpConfigSchema = {
   type: 'object',
   properties: {
@@ -226,6 +241,8 @@ const httpConfigSchema = {
       additionalProperties: {},
     },
     body: {},   // string or object
+    bodyFile: { type: 'string', minLength: 1 },   // streamed; ${VAR} resolved in the path only
+    bodyGenerate: bodyGenerateSchema,
     skipSslVerification: { type: 'boolean' },
     maxRedirects: { type: 'number' },
     cert: { type: 'string' },
@@ -235,6 +252,56 @@ const httpConfigSchema = {
     port: { oneOf: [{ type: 'number' }, { type: 'string' }] },
   },
   additionalProperties: false,
+  // A request has one body at most.
+  not: {
+    anyOf: [
+      { required: ['body', 'bodyFile'] },
+      { required: ['body', 'bodyGenerate'] },
+      { required: ['bodyFile', 'bodyGenerate'] },
+    ],
+  },
+  errorMessage: { not: 'body, bodyFile and bodyGenerate are mutually exclusive: set only one of them' },
+  // A streamed body is sent once. Following redirects would mean holding all
+  // of it in memory to replay it on a 307/308, and the redirect client breaks
+  // when the server redirects before reading the body.
+  if: { anyOf: [{ required: ['bodyFile'] }, { required: ['bodyGenerate'] }] },
+  then: {
+    properties: {
+      maxRedirects: {
+        const: 0,
+        errorMessage: 'must be 0 (the default) with bodyFile or bodyGenerate: a streamed body cannot be replayed on a redirect',
+      },
+    },
+  },
+};
+
+// bodyFile / bodyGenerate are streamed by the local HTTP client (source.type
+// local, or usePortForward) or piped to curl's stdin (usePodExec). The default
+// kubectl-debug pod mode embeds the body in a generated script, so it cannot
+// send one. Applies to a test and to an httpBodyComparison request alike.
+const streamedBodyNeedsStreamingSource = {
+  if: {
+    required: ['http', 'source'],
+    properties: {
+      http: { type: 'object', anyOf: [{ required: ['bodyFile'] }, { required: ['bodyGenerate'] }] },
+      source: {
+        type: 'object',
+        required: ['type'],
+        properties: { type: { const: 'pod' } },
+        not: {
+          anyOf: [
+            { required: ['usePodExec'], properties: { usePodExec: { const: true } } },
+            { required: ['usePortForward'], properties: { usePortForward: { const: true } } },
+          ],
+        },
+      },
+    },
+  },
+  then: {
+    not: { required: ['http'] },
+    errorMessage:
+      'http.bodyFile and http.bodyGenerate need source.type: local, or a pod source with usePodExec or usePortForward (the default kubectl-debug pod mode cannot stream a request body)',
+  },
 };
 
 // ── HTTP expect ──────────────────────────────────────────────────────
@@ -276,6 +343,10 @@ const httpExpectSchema = {
       items: jsonPathExpectationItem,
       minItems: 1,
     },
+    // Exact response body size in bytes. On its own (no other body
+    // assertion or setVars rule reading the body) the body is counted as it
+    // streams instead of being held in memory.
+    bodySize: { type: 'integer', minimum: 0 },
     headers: {
       type: 'array',
       items: headerExpectationItem,
@@ -295,11 +366,12 @@ const httpExpectSchema = {
         { required: ['bodyContains'] },
         { required: ['bodyRegex'] },
         { required: ['bodyJsonPath'] },
+        { required: ['bodySize'] },
         { required: ['headers'] },
       ],
     },
     errorMessage:
-      'expect.connectionError cannot be combined with response-based expectations (statusCode, body, bodyContains, bodyRegex, bodyJsonPath, headers)',
+      'expect.connectionError cannot be combined with response-based expectations (statusCode, body, bodyContains, bodyRegex, bodyJsonPath, bodySize, headers)',
   },
 };
 
@@ -482,6 +554,7 @@ const httpBodyComparisonRequestSchema = {
     http: httpConfigSchema,
     source: sourceSchema,
   },
+  allOf: [streamedBodyNeedsStreamingSource],
   additionalProperties: false,
 };
 
@@ -576,6 +649,8 @@ const testDefinitionSchema = {
         errorMessage: 'http.url is required (or use source.selector.kind: Service for auto-discovery)',
       },
     },
+    // HTTP: a streamed request body needs a source that can stream it
+    streamedBodyNeedsStreamingSource,
     // Command: validate expect and setVars shapes
     {
       if: { required: ['command'] },
@@ -676,6 +751,18 @@ ajv.addKeyword({
     } catch {
       return false;
     }
+  },
+});
+
+// http.bodyGenerate: the suffix must fit in `size` bytes. Plain JSON Schema
+// cannot compare two properties, and maxLength counts characters, not bytes.
+ajv.addKeyword({
+  keyword: 'bodyGenerateFits',
+  type: 'object',
+  errors: false,
+  validate: function bodyGenerateFits(schemaVal, data) {
+    if (!schemaVal || !Number.isInteger(data.size) || typeof data.suffix !== 'string') return true;
+    return Buffer.byteLength(data.suffix, 'utf8') <= data.size;
   },
 });
 

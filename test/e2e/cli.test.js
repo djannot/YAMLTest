@@ -463,6 +463,75 @@ describe('CLI e2e – --check', () => {
     expect(r.stdout).toContain('ok');
     expect(r.stderr).toBe('');
   });
+
+  it('exits 1 when body is set together with bodyFile', () => {
+    const yaml = JSON.stringify({
+      name: 'body-and-file',
+      http: { url: 'https://example.com', method: 'POST', body: 'inline', bodyFile: '/data/body.bin' },
+      source: { type: 'local' },
+      expect: { statusCode: 200 },
+    });
+    const r = runCli(yaml, ['--check', '-f', '-']);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('Test #1 ("body-and-file") /http: body, bodyFile and bodyGenerate are mutually exclusive');
+  });
+
+  it('exits 1 when body is set together with bodyGenerate', () => {
+    const yaml = JSON.stringify({
+      name: 'body-and-generate',
+      http: { url: 'https://example.com', method: 'POST', body: 'inline', bodyGenerate: { size: 10 } },
+      source: { type: 'local' },
+      expect: { statusCode: 200 },
+    });
+    const r = runCli(yaml, ['--check', '-f', '-']);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('Test #1 ("body-and-generate") /http: body, bodyFile and bodyGenerate are mutually exclusive');
+  });
+
+  it('accepts bodyFile, bodyGenerate and bodySize without touching the file', () => {
+    // --check validates structure only: the bodyFile need not exist yet.
+    const yaml = JSON.stringify([
+      { name: 'file', http: { url: 'https://example.com', method: 'PUT', bodyFile: '${BODIES}/missing.bin' }, source: { type: 'local' }, expect: { statusCode: 200 } },
+      { name: 'generated', http: { url: 'https://example.com', method: 'POST', bodyGenerate: { size: 5000000, suffix: 'blocked-request-body' } }, source: { type: 'local' }, expect: { statusCode: 406 } },
+      { name: 'sized', http: { url: 'https://example.com', path: '/bytes/20000000' }, source: { type: 'local' }, expect: { statusCode: 200, bodySize: 20000000 } },
+    ]);
+    const r = runCli(yaml, ['--check', '-f', '-']);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('ok');
+  });
+});
+
+// ── Large bodies ──────────────────────────────────────────────────────────────
+
+describe('CLI e2e – large bodies', () => {
+  it('reports a missing bodyFile after one attempt, naming the path', () => {
+    const missing = path.join(os.tmpdir(), `yamltest-missing-${process.pid}-${Date.now()}.bin`);
+    const yaml = JSON.stringify({
+      name: 'missing-body-file',
+      http: { url: base(), method: 'POST', path: '/health', bodyFile: missing },
+      source: { type: 'local' },
+      expect: { statusCode: 200 },
+    });
+    const r = runCli(yaml, ['-f', '-', '--retries', '3'], { YAMLTEST_RETRY_INTERVAL_MS: '1000' });
+    expect(r.status).toBe(1);
+    expect(r.stdout).toContain(`http.bodyFile not found: ${missing}`);
+    expect(r.stdout).toContain(`→ bodyFile ${missing}`);
+    expect(r.stdout).not.toContain('attempts]'); // one attempt: no retries
+  });
+
+  it('prints the body size of the observed response on a bodySize mismatch', () => {
+    const yaml = JSON.stringify({
+      name: 'size-mismatch',
+      http: { url: base(), method: 'GET', path: '/health' },
+      source: { type: 'local' },
+      expect: { statusCode: 200, bodySize: 6 }, // "healthy" is 7 bytes
+    });
+    const r = runCli(yaml);
+    expect(r.status).toBe(1);
+    expect(r.stdout).toContain('Body size mismatch: expected 6 bytes, got 7 bytes');
+    expect(r.stdout).toContain('← body size 7 bytes');
+    expect(r.stdout).toContain('← body healthy');
+  });
 });
 
 // ── File input ────────────────────────────────────────────────────────────────
